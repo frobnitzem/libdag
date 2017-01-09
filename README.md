@@ -99,7 +99,7 @@ task_t *run(void *self, void *runinfo) {
     //... do some computation on self ...
     if(I_should_redo(self)) {
         task_t *start = new_task(NULL, NULL);
-        link_task(self, start);
+        link_task(task_of(self), start);
         return start; // causes immediate enqueue of self
     }
     return NULL; // no expansion

@@ -81,7 +81,7 @@ task_t *hash_two(void *x, void *runinfo) {
     }
     op->val = integerHash(op->a->val | (op->b->val<<16));
 end:
-    //printf("node %d ~> %04x\n", op->id, op->val);
+    printf("node %d ~> %04x\n", op->id, op->val);
     return NULL;
 }
 
@@ -113,7 +113,7 @@ int check10(oper_t *dag) {
 }
 void setup10(oper_t dag[10]) {
     for(int i=0; i<10; i++) {
-        dag[i].id = 0;
+        dag[i].id = i;
         dag[i].val = i+1;
         dag[i].a = dag[i].b = NULL;
     }
@@ -148,10 +148,10 @@ int dag10() {
     // create task_t-s from oper_t-s
     for(int i=0; i<10; i++) {
         if(dag[i].a == NULL) { // no deps
-            task[i] = new_task(NULL, start);
+            task[i] = new_task(&dag[i], start);
         } else { // Since we know op-s are in topo-sort order,
             int j = dag+i - dag[i].a; // dag[i] > dag[i].a,b.
-            task[i] = new_task(NULL, NULL);
+            task[i] = new_task(&dag[i], NULL);
             link_task(task[i], task[i-j]);
             if(dag[i].b != NULL) {
                 int j = dag+i - dag[i].b;

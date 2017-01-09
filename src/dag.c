@@ -3,25 +3,6 @@
 #include <strings.h>
 #include <unistd.h>
 
-struct GlobalInfo {
-    // For accessing other threads.
-    thread_queue_t *threads;
-    int nthreads;
-    run_fn run;
-    void *runinfo;
-};
-
-struct ThreadQueue {
-    pthread_mutex_t L;
-    task_t **deque;
-    task_t **T, **H, **E;
-
-    pthread_t tid;
-    int deque_size; // len(deque)
-    int rank;
-    struct GlobalInfo *global;
-};
-
 // Initial and max deque sizes for ea. thread.
 #define INIT_STACK (128)
 #define MAX_STACK (32768)
@@ -38,6 +19,27 @@ struct TaskList {
     turf_atomic16_t tasks;
     uint16_t avail; // max available space
     task_t *task[];
+};
+
+struct GlobalInfo {
+    // For accessing other threads.
+    thread_queue_t *threads;
+    int nthreads;
+    run_fn run;
+    void *runinfo;
+
+    struct TaskList *initial; // where tasks was copied to avail for convenience
+};
+
+struct ThreadQueue {
+    pthread_mutex_t L;
+    task_t **deque;
+    task_t **T, **H, **E;
+
+    pthread_t tid;
+    int deque_size; // len(deque)
+    int rank;
+    struct GlobalInfo *global;
 };
 
 /********************* Work queue routines *****************/
@@ -91,6 +93,7 @@ static task_t *pop(thread_queue_t *thr) {
         lock(&thr->L);
         if(thr->E > thr->T) {
             printf("Detected error in pop()\n");
+            unlock(&thr->L);
             return NULL;
         }
         thr->T--;
@@ -129,14 +132,17 @@ static task_t *get_work(thread_queue_t *thr) {
 
         { // try to steal
             unsigned int k = random();
-            unsigned int mod = thr->global->nthreads;
+            unsigned int mod = thr->global->nthreads-1;
             for(unsigned int j=0; j<mod; j++) {
-                w = steal(&thr->global->threads[(j+k)%mod]);
+                int v = (j+k)%mod;
+                v += v >= thr->rank;
+                w = steal(&thr->global->threads[v]);
                 if(w != NULL)
                     break;
             }
-            printf("no threads with available work.\n");
-            usleep(random()%100);
+            printf("Thread %d: no threads with available work.\n", thr->rank);
+            //usleep(random()%100);
+            sleep(1);
         }
     }
     return w;
@@ -221,11 +227,14 @@ static int add_successor(task_t *n, task_t *s) {
 // decrement join counter of all its successors.
 // If the join counter reaches zero, add them to thr's deque.
 //
+// This returns the number of new additions.
+// If this is zero, the caller deduces the DAG is complete.
+//
 // Notes:
 //   Only one thread (the running thread) will ever call this routine,
 //   and it only occurs once for each task.
 //   It processes all the successors of the task.
-static void mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
+static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
     struct TaskList *list = turf_exchangePtr(&n->successors, NULL,
                                              TURF_MEMORY_ORDER_ACQUIRE);
     // Stop further writes to the list.
@@ -245,10 +254,12 @@ static void mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
     }
 
     free(list);
+    return tasks;
 }
 
 /***************** Per-Thread Programs *****************/
-static void thread_ctor(int rank, int tasks, void *data, void *info) {
+#define MIN(a,b) (a) < (b) ? (a) : (b);
+static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
 
     Pthread_mutex_init(&thr->L, NULL);
@@ -261,9 +272,19 @@ static void thread_ctor(int rank, int tasks, void *data, void *info) {
     if(rank == 0) {
         thr->global->threads = thr;
     }
+
+    { // seed tasks.
+        int mine = thr->global->initial->avail;
+        int start = mine;
+        mine = mine/nthreads + (rank < (mine%nthreads));
+        start = (start/nthreads)*rank + MIN(start%nthreads, rank);
+        for(int i=0; i<mine; i++) {
+            push(thr, thr->global->initial->task[i+start]);
+        }
+    }
 }
 
-static void thread_dtor(int rank, int tasks, void *data, void *info) {
+static void thread_dtor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
     free(thr->deque);
     Pthread_mutex_destroy(&thr->L);
@@ -273,23 +294,35 @@ static void *thread_work(void *data) {
     thread_queue_t *thr = (thread_queue_t *)data;
     task_t *task = NULL;
 
-    // TODO: correctly address starvation and completion conditions.
+    // TODO: optimize handling of starvation and completion conditions.
     while( (task = get_work(thr))) {
         task_t *start = thr->global->run(task->info, thr->global->runinfo);
         if(start == NULL) {
-            mv_successors_to_deque(thr, task);
+            if(mv_successors_to_deque(thr, task) == 0) {
+                goto final;
+            }
         } else {
-            mv_successors_to_deque(thr, start);
+            if(mv_successors_to_deque(thr, start) == 0) {
+                goto final;
+            }
             del_task(start);
         }
     }
+    return NULL;
+final: // found end, signal all dag-s
+    printf("Thread %d: Signaling other threads.\n", thr->rank);
+    for(int k=0; k<thr->global->nthreads; k++) {
+        k += k == thr->rank;
+        thr->global->threads[k].E += MAX_STACK;
+    }
+    turf_threadFenceRelease();
     return NULL;
 }
 
 void del_task(task_t *task) {
     struct TaskList *list = turf_loadPtr(&task->successors,
                                          TURF_MEMORY_ORDER_ACQUIRE);
-    free(list);
+    if(task) free(list); // incomplete?
     free(task);
 }
 
@@ -325,11 +358,22 @@ void exec_dag(task_t *start, run_fn run, void *runinfo) {
         .nthreads = 8,
         .run = run,
         .runinfo = runinfo,
+        .initial = turf_exchangePtrRelaxed(&start->successors, NULL)
     };
     // TODO: Create global mutex/condition
     // for handling task starvation and determining whether
     // work is complete.
+    del_task(start);
+
+    global.initial->avail = turf_load16Relaxed(&global.initial->tasks);
+    if(global.initial->avail < 1) {
+        fprintf(stderr, "exec_dag: start task has no dependencies!\n");
+        free(global.initial);
+        return;
+    }
+
     run_threaded(global.nthreads, sizeof(thread_queue_t), &thread_ctor,
                  &thread_work, &thread_dtor, &global);
+    free(global.initial);
 }
 

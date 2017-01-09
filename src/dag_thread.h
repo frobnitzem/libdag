@@ -23,17 +23,26 @@
 }
 
 #define Pthread_mutex_init(m, attr) { \
-    if(pthread_mutex_init(m, attr)) { \
-        fprintf(stderr, "Failed pthread_mutex_init at %s:%d (in %s)", \
-                        __FILE__, __LINE__, __func__); \
+    int r; \
+    if( (r = pthread_mutex_init(m, attr))) { \
+        fprintf(stderr, "Failed pthread_mutex_init at %s:%d (in %s)" \
+                        " -- err = %d\n", \
+                        __FILE__, __LINE__, __func__, r); \
         exit(1); \
     } \
 }
 #define Pthread_mutex_destroy(m) { \
-    if(pthread_mutex_destroy(m)) { \
-        fprintf(stderr, "Failed pthread_mutex_destroy at %s:%d (in %s)", \
-                        __FILE__, __LINE__, __func__); \
-        exit(1); \
+    int r = pthread_mutex_destroy(m); \
+    if(r) { \
+        /*if(r == EBUSY) { \
+            lock(m); \
+            unlock(m); \
+        } else*/ { \
+            fprintf(stderr, "Failed pthread_mutex_destroy at %s:%d (in %s)" \
+                            " -- err = %d\n", \
+                            __FILE__, __LINE__, __func__, r); \
+            exit(1); \
+        } \
     } \
 }
 
