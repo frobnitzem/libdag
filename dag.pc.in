@@ -1,0 +1,12 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: Dag
+Description: A library for executing task dags with pthreads
+URL: https://www.predictivestatmech.org/dag
+Version: @VERSION@
+Requires: 
+Cflags: -I${includedir}
+Libs: -L${libdir} -ldag
