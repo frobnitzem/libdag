@@ -3,9 +3,14 @@
 #include <strings.h>
 #include <unistd.h>
 
+//#define progress(...) printf(__VA_ARGS__)
+#define progress(...)
+
 // Initial and max deque sizes for ea. thread.
 #define INIT_STACK (128)
 #define MAX_STACK (32768)
+
+#define minfo(x) (*(int *)(x)->info)
 
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
@@ -92,7 +97,7 @@ static task_t *pop(thread_queue_t *thr) {
         thr->T++;
         lock(&thr->L);
         if(thr->E > thr->T) {
-            printf("Detected error in pop()\n");
+            progress("Detected error in pop()\n");
             unlock(&thr->L);
             return NULL;
         }
@@ -103,12 +108,15 @@ static task_t *pop(thread_queue_t *thr) {
             return NULL;
         }
         unlock(&thr->L);
+    } else {
+        progress("%d: successful pop (%d)\n", thr->rank, minfo(*thr->T));
     }
     return *thr->T;
 }
 
 // thr is the victim
 static task_t *steal(thread_queue_t *v) {
+    task_t *ret;
     lock(&v->L);
     v->E++;
     if(v->E > v->T) {
@@ -116,9 +124,10 @@ static task_t *steal(thread_queue_t *v) {
         unlock(&v->L);
         return NULL;
     }
+    ret = *v->H;
     v->H++;
     unlock(&v->L);
-    return *v->H;
+    return ret;
 }
 
 static task_t *get_work(thread_queue_t *thr) {
@@ -126,7 +135,7 @@ static task_t *get_work(thread_queue_t *thr) {
 
     while(w == NULL) {
         if(thr->E > thr->T) {
-            printf("Found error condition!\n");
+            progress("Found error condition!\n");
             return NULL;
         }
 
@@ -137,12 +146,13 @@ static task_t *get_work(thread_queue_t *thr) {
                 int v = (j+k)%mod;
                 v += v >= thr->rank;
                 w = steal(&thr->global->threads[v]);
-                if(w != NULL)
-                    break;
+                if(w != NULL) {
+                    progress("steal success %d <- %d (%d)\n", thr->rank, v,
+                                                minfo(w));
+                    return w;
+                }
             }
-            printf("Thread %d: no threads with available work.\n", thr->rank);
-            //usleep(random()%100);
-            sleep(1);
+            usleep(random()%100);
         }
     }
     return w;
@@ -248,9 +258,12 @@ static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
             turf_threadFenceAcquire(); // need to get task[i]
             continue;
         }
-        if(turf_fetchAdd16Relaxed(&s->joins, -1) == 1) {
+        int16_t joins;
+        if( (joins = turf_fetchAdd16Relaxed(&s->joins, -1)) == 1) {
             push(thr, s); // Enqueue task.
         }
+        progress("%d: %d --> %d (%d)\n",
+                            thr->rank, minfo(n), minfo(s), joins-1);
     }
 
     free(list);
@@ -310,10 +323,12 @@ static void *thread_work(void *data) {
     }
     return NULL;
 final: // found end, signal all dag-s
-    printf("Thread %d: Signaling other threads.\n", thr->rank);
+    progress("Thread %d: Signaling other threads.\n", thr->rank);
     for(int k=0; k<thr->global->nthreads; k++) {
         k += k == thr->rank;
+        lock(&thr->global->threads[k].L);
         thr->global->threads[k].E += MAX_STACK;
+        unlock(&thr->global->threads[k].L);
     }
     turf_threadFenceRelease();
     return NULL;
@@ -338,6 +353,7 @@ task_t *new_task(void *a, task_t *start) {
 
     task->info = a;
     turf_storePtrRelaxed(&task->successors, list);
+    turf_store16Relaxed(&task->joins, 0);
 
     if(start != NULL) {
         link_task(task, start);
