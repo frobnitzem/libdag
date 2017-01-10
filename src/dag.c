@@ -3,6 +3,8 @@
 #include <strings.h>
 #include <unistd.h>
 
+#define DEBUG
+
 // used by progress (but requires task->info point to an int)
 #define minfo(x) ((x)->info == NULL ? 0 : *(int *)(x)->info)
 //#define progress(...) printf(__VA_ARGS__)

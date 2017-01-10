@@ -1,4 +1,5 @@
 #include <dag.h>
+#include <math.h>
 #include "test.h"
 #include <turf/atomic.h>
 
@@ -169,7 +170,8 @@ int dag10() {
     return check10(dag);
 }
 
-void *noop(void *a) {
+// test 6
+task_t *noop(void *a, void *b) {
     return NULL;
 };
 // TODO: malloc alternative for new_task
@@ -207,11 +209,121 @@ err:
     return ret;
 }
 
+// test 7
+typedef struct FFTNode fft_node_t;
+struct FFTNode {
+    int id;
+    fft_node_t *l, *r;
+    double re, im;
+};
+
+task_t **first_task;
+// number of sub-tasks at level k (grouped together in blocks of mem).
+#define SUBTASKS(k) ((k) == 0 ? 1 : (((k)+1)*(1<<(k))))
+// Create subtask at level k
+// 1<<k nodes are added first to the buffer, and remaining k-1 levels
+// are added at offsets of skipL and skipR
+// Obviously, node and task must have size
+// SUBTASKS(k) = 1<<k + 2*SUBTASKS(k-1).
+//
+// Note: Setup is likely more expensive than actually running the DAG...
+void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k) {
+    if(k == 0) {
+        // node->re, im contain the input data, but addressing
+        // is difficult.
+        // Let's just use the alternating pattern, 0,1,0,1,...
+        task[0] = new_task(node, start);
+        node->l = NULL; // We could start at k=1, but I'm lazy.
+        //printf("task[%d] : 0,0 = %p\n", (task-first_task)/8, task[0]);
+        node->im = 0.0;
+        return;
+    }
+    int n = 1<<k;
+    int nsub = SUBTASKS(k-1);
+    int skipL = n;
+    int skipR = n+nsub;
+    //printf("n,nsub,skipL,skipR = %d,%d,%d,%d\n", n, nsub, skipL, skipR);
+    if(k == 1) {
+        node[skipL].re = 0.0;
+        node[skipR].re = 1.0;
+    }
+
+    mk_butterfly(node+skipL, task+skipL, start, k-1);
+    mk_butterfly(node+skipR, task+skipR, start, k-1);
+    for(int i=0; i<n; i++) {
+        int off = i < n/2 ? i : i-n/2;
+        node[i].im = (double)i/n; // which root to use here.
+        node[i].l = node+skipL+off;
+        node[i].r = node+skipR+off;
+
+        task[i] = new_task(node+i, task[skipL+off]);
+        // TODO: Sending the wrong addresses to link_node
+        // is painful to debug.  I think the hash-map for node id-s is
+        // the way to go.
+        //printf("task[%d] : %d,%d = %p\n", (task-first_task)/8+i, k, i, task[i]);
+        link_task(task[i], task[skipR+off]);
+    }
+}
+task_t *fft_step(void *info, void *global) {
+    fft_node_t *n = (fft_node_t *)info;
+    if(n->l == NULL) return NULL;
+
+    double c = cos(2.0*M_PI*n->im);
+    double s = sin(2.0*M_PI*n->im);
+    n->re = n->l->re + c*n->r->re - s*n->r->im;
+    n->im = n->l->im + c*n->r->im + s*n->r->re;
+    return NULL;
+}
+int butterfly(int layers) {
+    int err = 0;
+    int n = 1<<layers;
+    int n2 = 1<<(layers-1);
+    fft_node_t *node = malloc(sizeof(fft_node_t)*SUBTASKS(layers));
+    task_t **task = malloc(sizeof(task_t *)*SUBTASKS(layers));
+    task_t *start = new_task(NULL, NULL);
+
+    first_task = task;
+    mk_butterfly(node, task, start, layers);
+
+    exec_dag(start, fft_step, NULL);
+    // test result
+    if(fabs(node[0].re - n2) > 1e-8) {
+        printf("# FFT 0-channel %f != %d\n", node[0].re, n2);
+        err++;
+    }
+    if(fabs(node[n2].re + n2) > 1e-8) {
+        printf("# FFT Nyquist-channel %f != -%d\n", node[n2].re, n2);
+        err++;
+    }
+    for(int i=1; i<n; i++) {
+        if(i == n2) continue;
+        if(fabs(node[i].re) > 1e-8) {
+            printf("# FFT channel re[%d]: %f != 0.0\n", i, node[i].re);
+            err++;
+        }
+    }
+    for(int i=0; i<n; i++) {
+        if(fabs(node[i].im) > 1e-8) {
+            printf("# FFT channel im[%d]: %f != 0.0\n", i, node[i].im);
+            err++;
+        }
+    }
+
+    n = SUBTASKS(layers);
+    for(int i=0; i<n; i++) {
+        del_task(task[i]);
+    }
+    free(task);
+    free(node);
+
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
     global_info_t g = { .data = 0 };
     turf_store16Relaxed(&g.atom, 0);
 
-    printf("1..6\n");
+    printf("1..9\n");
     check("Simple threaded run succeeds",
           run_threaded(4, 0, &setup, &work, &dtor, NULL));
     check("REL/ACQ threaded run succeeds",
@@ -223,4 +335,8 @@ int main(int argc, char *argv[]) {
     check("10-node dag has correct execution order", dag10());
 
     check("wide parallel dag succeeds", wide_dag());
+
+    check("butterfly-2 dag succeeds", butterfly(2));
+    check("butterfly-4 dag succeeds", butterfly(4));
+    check("butterfly-6 dag succeeds", butterfly(6));
 }
