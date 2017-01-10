@@ -3,14 +3,14 @@
 #include <strings.h>
 #include <unistd.h>
 
+// used by progress (but requires task->info point to an int)
+#define minfo(x) ((x)->info == NULL ? 0 : *(int *)(x)->info)
 //#define progress(...) printf(__VA_ARGS__)
 #define progress(...)
 
 // Initial and max deque sizes for ea. thread.
 #define INIT_STACK (128)
 #define MAX_STACK (32768)
-
-#define minfo(x) (*(int *)(x)->info)
 
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
@@ -41,7 +41,6 @@ struct ThreadQueue {
     task_t **deque;
     task_t **T, **H, **E;
 
-    pthread_t tid;
     int deque_size; // len(deque)
     int rank;
     struct GlobalInfo *global;
@@ -54,12 +53,12 @@ static void resize_deque(thread_queue_t *thr) {
     lock(&thr->L);
     sz = thr->T - thr->H;
     if(sz > MAX_STACK) {
-        fprintf(stderr, "Thread %d of stack: %d > %d\n",
+        fprintf(stderr, "Thread %d has stack size %d (> max=%d)\n",
                          thr->rank, sz, MAX_STACK);
         exit(1);
     }
     if(sz > thr->deque_size/2) {
-        task_t **deq = realloc(thr->deque, sz*2);
+        task_t **deq = realloc(thr->deque, sz*2*sizeof(task_t *));
         if(deq == NULL) {
             fprintf(stderr, "Memory error: stack size = %d\n", sz);
             exit(1);
@@ -68,6 +67,7 @@ static void resize_deque(thread_queue_t *thr) {
         thr->H += deq - thr->deque;
         thr->E += deq - thr->deque;
         thr->deque = deq;
+        thr->deque_size = sz*2;
     }
     if(thr->H != thr->deque) { // move back to start
         bcopy(thr->H, thr->deque, sz*sizeof(task_t *));
@@ -92,7 +92,7 @@ static void push(thread_queue_t *thr, task_t *task) {
 static task_t *pop(thread_queue_t *thr) {
     thr->T--;
     turf_threadFenceRelease();
-    turf_threadFenceAcquire();
+    turf_threadFenceAcquire(); // ACQ not needed?
     if(thr->E > thr->T) { // handle exception
         thr->T++;
         lock(&thr->L);
@@ -114,11 +114,12 @@ static task_t *pop(thread_queue_t *thr) {
     return *thr->T;
 }
 
-// thr is the victim
+// steal task from victim
 static task_t *steal(thread_queue_t *v) {
     task_t *ret;
-    lock(&v->L);
+    lock(&v->L); // should acquire T
     v->E++;
+    turf_threadFenceAcquire(); // be sure T is there!
     if(v->E > v->T) {
         v->E--;
         unlock(&v->L);
@@ -200,9 +201,11 @@ static struct TaskList *grow_tasklist(struct Task *n, struct TaskList *old) {
         struct TaskList *prev = turf_compareExchangePtr(
                 &n->successors, old, list, TURF_MEMORY_ORDER_RELEASE);
         if(prev == old) { // succeed.
+            progress("New successor list creation succeeds.\n");
             free(old);
             return list;
         }
+        progress("New successor list creation fails.\n");
         // fail.
         free(list);
         return prev;
@@ -248,6 +251,13 @@ static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
     struct TaskList *list = turf_exchangePtr(&n->successors, NULL,
                                              TURF_MEMORY_ORDER_ACQUIRE);
     // Stop further writes to the list.
+#ifdef DEBUG
+    if(list == NULL) { // sanity check.
+        printf("Error - NULL successors list for (%d)?\n", minfo(n));
+        fflush(stdout);
+        exit(1);
+    }
+#endif
     int16_t tasks = turf_fetchAdd16Relaxed(&list->tasks, list->avail+1);
 
     int16_t i;
@@ -271,7 +281,7 @@ static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
 }
 
 /***************** Per-Thread Programs *****************/
-#define MIN(a,b) (a) < (b) ? (a) : (b);
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
 static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
 
@@ -287,10 +297,10 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     }
 
     { // seed tasks.
-        int mine = thr->global->initial->avail;
-        int start = mine;
-        mine = mine/nthreads + (rank < (mine%nthreads));
-        start = (start/nthreads)*rank + MIN(start%nthreads, rank);
+        int avail = thr->global->initial->avail;
+        int mine  = avail/nthreads + (rank < (avail%nthreads));
+        int start = (avail/nthreads)*rank + MIN(avail%nthreads, rank);
+        progress("%d: Initial start = %d, mine = %d\n", thr->rank, start, mine);
         for(int i=0; i<mine; i++) {
             push(thr, thr->global->initial->task[i+start]);
         }
@@ -309,6 +319,7 @@ static void *thread_work(void *data) {
 
     // TODO: optimize handling of starvation and completion conditions.
     while( (task = get_work(thr))) {
+        progress("%d: working on (%d)\n", thr->rank, minfo(task));
         task_t *start = thr->global->run(task->info, thr->global->runinfo);
         if(start == NULL) {
             if(mv_successors_to_deque(thr, task) == 0) {
@@ -325,7 +336,7 @@ static void *thread_work(void *data) {
 final: // found end, signal all dag-s
     progress("Thread %d: Signaling other threads.\n", thr->rank);
     for(int k=0; k<thr->global->nthreads; k++) {
-        k += k == thr->rank;
+        if(k == thr->rank) continue;
         lock(&thr->global->threads[k].L);
         thr->global->threads[k].E += MAX_STACK;
         unlock(&thr->global->threads[k].L);
@@ -337,7 +348,7 @@ final: // found end, signal all dag-s
 void del_task(task_t *task) {
     struct TaskList *list = turf_loadPtr(&task->successors,
                                          TURF_MEMORY_ORDER_ACQUIRE);
-    if(task) free(list); // incomplete?
+    if(list) free(list); // incomplete?
     free(task);
 }
 

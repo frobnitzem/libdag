@@ -81,7 +81,8 @@ task_t *hash_two(void *x, void *runinfo) {
     }
     op->val = integerHash(op->a->val | (op->b->val<<16));
 end:
-    printf("node %d ~> %04x\n", op->id, op->val);
+    if(op->id < 100) // Don't go overboard with the printing.
+        printf("# node %d ~> %04x\n", op->id, op->val);
     return NULL;
 }
 
@@ -168,11 +169,49 @@ int dag10() {
     return check10(dag);
 }
 
+void *noop(void *a) {
+    return NULL;
+};
+// TODO: malloc alternative for new_task
+int wide_dag() {
+    int ret = 1, j = 0, width = 20000;
+    int *ids = malloc(sizeof(int)*width);
+    task_t *start = new_task(NULL, NULL);
+    task_t *end = new_task(NULL, NULL);
+    task_t **tasks = malloc(sizeof(task_t *)*width);
+    if(tasks == NULL) {
+        printf("# memory alloc error.\n");
+        return 1;
+    }
+    for(int i=0; i<width; i++) {
+        ids[i] = i+1;
+        tasks[i] = new_task(&ids[i], start);
+        j += link_task(end, tasks[i]);
+    }
+    printf("# linked %d tasks\n", j);
+    if(j != width) {
+        goto err;
+    }
+
+    exec_dag(start, noop, NULL);
+    ret = 0;
+
+err:
+    for(int i=0; i<width; i++) {
+        del_task(tasks[i]);
+    }
+    del_task(end);
+    free(tasks);
+    free(ids);
+
+    return ret;
+}
+
 int main(int argc, char *argv[]) {
     global_info_t g = { .data = 0 };
     turf_store16Relaxed(&g.atom, 0);
 
-    printf("1..5\n");
+    printf("1..6\n");
     check("Simple threaded run succeeds",
           run_threaded(4, 0, &setup, &work, &dtor, NULL));
     check("REL/ACQ threaded run succeeds",
@@ -182,4 +221,6 @@ int main(int argc, char *argv[]) {
     check("single-node dag execution succeeds", single_dag());
 
     check("10-node dag has correct execution order", dag10());
+
+    check("wide parallel dag succeeds", wide_dag());
 }
