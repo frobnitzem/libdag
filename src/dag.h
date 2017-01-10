@@ -15,4 +15,5 @@ void del_task(task_t *task);
 // so this is just informational and shouldn't be used practically.
 int link_task(task_t *task, task_t *dep);
 void exec_dag(task_t *start, run_fn run, void *runinfo);
+void *get_info(task_t *task);
 

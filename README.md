@@ -24,11 +24,16 @@ The next level, in `dag.h`, includes `dag_thread.h`, and
 adds task execution scheduling.  It requires the user to build
 a task graph (by wrapping the user's data structures inside
 `task_t` objects, and then call `exec_dag`.  Other than the task API:
-``
-  get_info : task_t -> A
-  new_task : A, Maybe task_t -> task_t  [ always creates a fresh task ]
-  link_task : task_t -> task_t -> ()    [ second arg is child, and is modified ]
-``
+
+```
+  get_info  : task_t -> A
+  new_task  : A, Maybe task_t -> task_t  [ always creates a fresh task ]
+  link_task : task_t -> task_t -> Int  [First arg is parent,
+                                       second arg is child.]
+  exec_dag  : task_t -> (A -> G -> task_t) -> G -> ()
+  del_task  : task_t -> ()
+```
+
 the `task_t` structures are opaque.  The user must therefore use their own
 data structure (type `A`) to hold the reference structure and
 implement return value passing.
@@ -40,7 +45,7 @@ Using the library is really just as simple as calling
 `new_task` and `link_task` while traversing the user's
 data structure.
 
-The caller must that added
+The caller must ensure that added
 links do not create a cycle in the graph,
 or else execution will deadlock.
 A cycle happens whenever the added dependency is
@@ -48,11 +53,11 @@ reachable by traversing the the successors of the current node.
 libdag does not check this, because it assumes the user
 will actually add a DAG.
 
-The user must create a special (no-op) task
-to serve as the `start` task [use `task_t *start = new_task(NULL, NULL)`].
+The user must create a special (no-op) task to serve as
+the `start` task [use <code>task_t *start = new_task(NULL, NULL)</code>].
 Whenever a leaf task (i.e. a task with no dependencies)
-is encountered, it should be linked as
-the parent of the start task.
+is encountered, it must be linked as
+the parent of the start task in order to be executed.
 
 For convenience, the second argument of `new_task`
 is added as a dependency of the current task during initialization.
@@ -63,6 +68,14 @@ is never really needed.  However, it can save the call to
 To run the DAG, pass the start task to `exec_dag`.
 Note that the start task itself is immediately
 free-ed by `exec_dag` and never executed.
+
+Examples are available in the test directory, and
+contains:
+
+* simple use of `run_threaded`
+* execution of a 10-node graph
+* execution of 20,000 trivially parallel nodes
+* computation of FFTs of size 2^k
 
 Advanced Topics
 ===============

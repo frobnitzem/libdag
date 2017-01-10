@@ -238,6 +238,14 @@ static int add_successor(task_t *n, task_t *s) {
     return 0; // YDNBH;
 }
 
+static void enable_task(thread_queue_t *thr, task_t *s) {
+    int16_t joins = turf_fetchAdd16Relaxed(&s->joins, -1) - 1;
+    if(joins == 0) {
+        push(thr, s); // Enqueue task.
+    }
+    progress("%d: %d --> %d (%d)\n", thr->rank, minfo(n), minfo(s), joins);
+}
+
 // Completed task 'n' -- block further additions and
 // decrement join counter of all its successors.
 // If the join counter reaches zero, add them to thr's deque.
@@ -249,7 +257,7 @@ static int add_successor(task_t *n, task_t *s) {
 //   Only one thread (the running thread) will ever call this routine,
 //   and it only occurs once for each task.
 //   It processes all the successors of the task.
-static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
+static int enable_successors(thread_queue_t *thr, struct Task *n) {
     struct TaskList *list = turf_exchangePtr(&n->successors, NULL,
                                              TURF_MEMORY_ORDER_ACQUIRE);
     // Stop further writes to the list.
@@ -270,12 +278,7 @@ static int mv_successors_to_deque(thread_queue_t *thr, struct Task *n) {
             turf_threadFenceAcquire(); // need to get task[i]
             continue;
         }
-        int16_t joins;
-        if( (joins = turf_fetchAdd16Relaxed(&s->joins, -1)) == 1) {
-            push(thr, s); // Enqueue task.
-        }
-        progress("%d: %d --> %d (%d)\n",
-                            thr->rank, minfo(n), minfo(s), joins-1);
+        enable_task(thr, s);
     }
 
     free(list);
@@ -304,7 +307,9 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
         int start = (avail/nthreads)*rank + MIN(avail%nthreads, rank);
         progress("%d: Initial start = %d, mine = %d\n", thr->rank, start, mine);
         for(int i=0; i<mine; i++) {
-            push(thr, thr->global->initial->task[i+start]);
+            task_t *task = thr->global->initial->task[i+start];
+            // Double-check here.
+            enable_task(thr, task);
         }
     }
 }
@@ -324,11 +329,11 @@ static void *thread_work(void *data) {
         progress("%d: working on (%d)\n", thr->rank, minfo(task));
         task_t *start = thr->global->run(task->info, thr->global->runinfo);
         if(start == NULL) {
-            if(mv_successors_to_deque(thr, task) == 0) {
+            if(enable_successors(thr, task) == 0) {
                 goto final;
             }
         } else {
-            if(mv_successors_to_deque(thr, start) == 0) {
+            if(enable_successors(thr, start) == 0) {
                 goto final;
             }
             del_task(start);
@@ -347,6 +352,11 @@ final: // found end, signal all dag-s
     return NULL;
 }
 
+/*************** top-level API ****************/
+void *get_info(task_t *task) {
+    return task->info;
+}
+
 void del_task(task_t *task) {
     struct TaskList *list = turf_loadPtr(&task->successors,
                                          TURF_MEMORY_ORDER_ACQUIRE);
@@ -354,7 +364,6 @@ void del_task(task_t *task) {
     free(task);
 }
 
-/*************** top-level API ****************/
 // OK to send NULL for start before running.
 // During execution, start should always be non-NULL
 // to prevent premature execution.
