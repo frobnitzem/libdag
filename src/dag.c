@@ -89,6 +89,7 @@ static void push(thread_queue_t *thr, task_t *task) {
     }
 
     *thr->T = task;
+    turf_threadFenceRelease();
     thr->T++;
 }
 static task_t *pop(thread_queue_t *thr) {

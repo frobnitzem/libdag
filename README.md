@@ -8,7 +8,8 @@ This library focuses on implementing computations on directed acyclic graphs,
 where child nodes must be computed before parents but no other constraints are
 present.
 The implementation differs from others by allowing considerable
-flexibility in how the 
+flexibility in how the DAG manages its data so the library itself
+can provide only what is necessary to ensure correct execution order.
 
 
 Using the Library
@@ -53,11 +54,16 @@ reachable by traversing the the successors of the current node.
 libdag does not check this, because it assumes the user
 will actually add a DAG.
 
-The user must create a special (no-op) task to serve as
-the `start` task [use <code>task_t *start = new_task(NULL, NULL)</code>].
+All DAGs must begin at a single `start` task and terminate
+at a single final task.
+The `start` task is a special (no-op) task
+you create with <code>task_t *start = new_task(NULL, NULL)</code>.
 Whenever a leaf task (i.e. a task with no dependencies)
 is encountered, it must be linked as
 the parent of the start task in order to be executed.
+The final task is executed.  If your graph produces multiple
+outputs, you'll need to make a special `end` task and link them
+as children (for detecting algorithm termination).
 
 For convenience, the second argument of `new_task`
 is added as a dependency of the current task during initialization.
@@ -69,8 +75,8 @@ To run the DAG, pass the start task to `exec_dag`.
 Note that the start task itself is immediately
 free-ed by `exec_dag` and never executed.
 
-Examples are available in the test directory, and
-contains:
+Examples are available in the test directory, which
+includes:
 
 * simple use of `run_threaded`
 * execution of a 10-node graph
@@ -106,18 +112,17 @@ will deadlock and never complete.
 Adding extra dependencies to the `start` task is OK.
 
 A minimal example that just re-runs the current node would
-therefore be,
-``
-task_t *run(void *self, void *runinfo) {
-    //... do some computation on self ...
-    if(I_should_redo(self)) {
-        task_t *start = new_task(NULL, NULL);
-        link_task(task_of(self), start);
-        return start; // causes immediate enqueue of self
+therefore be:
+
+    task_t *run(void *self, void *runinfo) {
+        //... do some computation on self ...
+        if(I_should_redo(self)) { 
+     	    task_t *start = new_task(NULL, NULL);
+            link_task(task_of(self), start);
+	    return start; // causes immediate enqueue of self
+	}	
+	return NULL; // no expansion
     }
-    return NULL; // no expansion
-}
-``
 
 
 DAG Coarsening

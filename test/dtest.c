@@ -218,6 +218,9 @@ struct FFTNode {
 };
 
 task_t **first_task;
+int levels;
+double *inp;
+
 // number of sub-tasks at level k (grouped together in blocks of mem).
 #define SUBTASKS(k) ((k) == 0 ? 1 : (((k)+1)*(1<<(k))))
 // Create subtask at level k
@@ -227,15 +230,17 @@ task_t **first_task;
 // SUBTASKS(k) = 1<<k + 2*SUBTASKS(k-1).
 //
 // Note: Setup is likely more expensive than actually running the DAG...
-void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k) {
+void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k,
+                    unsigned addr) {
     if(k == 0) {
-        // node->re, im contain the input data, but addressing
-        // is difficult.
-        // Let's just use the alternating pattern, 0,1,0,1,...
+        // node->re, im contain the input data.
         task[0] = new_task(node, start);
         node->l = NULL; // We could start at k=1, but I'm lazy.
-        //printf("task[%d] : 0,0 = %p\n", (task-first_task)/8, task[0]);
+        //printf("task[%d] : 0,0 = %p\n", (task-first_task), task[0]);
+        node->re = inp[addr];
         node->im = 0.0;
+        node->id = task-first_task;
+        //printf("Node %d: %d = %f\n", node->id, addr, inp[addr]);
         return;
     }
     int n = 1<<k;
@@ -243,52 +248,61 @@ void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k) {
     int skipL = n;
     int skipR = n+nsub;
     //printf("n,nsub,skipL,skipR = %d,%d,%d,%d\n", n, nsub, skipL, skipR);
-    if(k == 1) {
-        node[skipL].re = 0.0;
-        node[skipR].re = 1.0;
-    }
 
-    mk_butterfly(node+skipL, task+skipL, start, k-1);
-    mk_butterfly(node+skipR, task+skipR, start, k-1);
+    mk_butterfly(node+skipL, task+skipL, start, k-1, addr);
+    mk_butterfly(node+skipR, task+skipR, start, k-1, addr | (1<<(levels-k)));
     for(int i=0; i<n; i++) {
         int off = i < n/2 ? i : i-n/2;
         node[i].im = (double)i/n; // which root to use here.
         node[i].l = node+skipL+off;
         node[i].r = node+skipR+off;
+        node[i].id = task-first_task + i;
+        //printf("Node %d: %d,%d = %f\n", node[i].id, k, i, node[i].im);
 
         task[i] = new_task(node+i, task[skipL+off]);
-        // TODO: Sending the wrong addresses to link_node
+        // TODO: Sending the wrong addresses to link_task
         // is painful to debug.  I think the hash-map for node id-s is
         // the way to go.
-        //printf("task[%d] : %d,%d = %p\n", (task-first_task)/8+i, k, i, task[i]);
+        //printf("task[%d] : %d,%d = %p\n", task-first_task+i, k, i, task[i]);
         link_task(task[i], task[skipR+off]);
     }
 }
 task_t *fft_step(void *info, void *global) {
     fft_node_t *n = (fft_node_t *)info;
-    if(n->l == NULL) return NULL;
+    if(n == NULL || n->l == NULL) return NULL;
 
+    //printf("# %d: %f\n", n->id, n->im);
     double c = cos(2.0*M_PI*n->im);
     double s = sin(2.0*M_PI*n->im);
     n->re = n->l->re + c*n->r->re - s*n->r->im;
     n->im = n->l->im + c*n->r->im + s*n->r->re;
     return NULL;
 }
-int butterfly(int layers) {
+int butterfly() {
     int err = 0;
-    int n = 1<<layers;
-    int n2 = 1<<(layers-1);
-    fft_node_t *node = malloc(sizeof(fft_node_t)*SUBTASKS(layers));
-    task_t **task = malloc(sizeof(task_t *)*SUBTASKS(layers));
+    int n = 1<<levels;
+    int n2 = 1<<(levels-1);
+
+    inp = calloc(n, sizeof(double));
+    fft_node_t *node = malloc(sizeof(fft_node_t)*SUBTASKS(levels));
+    task_t **task = malloc(sizeof(task_t *)*SUBTASKS(levels));
     task_t *start = new_task(NULL, NULL);
+    task_t *end = new_task(NULL, NULL);
+
+    for(int i=1; i<n; i += 2) {
+        inp[i] = 1.0;
+    }
 
     first_task = task;
-    mk_butterfly(node, task, start, layers);
+    mk_butterfly(node, task, start, levels, 0);
+    for(int i=0; i<n; i++) {
+        link_task(end, task[i]);
+    }
 
     exec_dag(start, fft_step, NULL);
     // test result
     if(fabs(node[0].re - n2) > 1e-8) {
-        printf("# FFT 0-channel %f != %d\n", node[0].re, n2);
+        printf("# FFT 0-channel %f != %d\n", node[0].re, n, n2);
         err++;
     }
     if(fabs(node[n2].re + n2) > 1e-8) {
@@ -309,14 +323,15 @@ int butterfly(int layers) {
         }
     }
 
-    n = SUBTASKS(layers);
+    n = SUBTASKS(levels);
+    del_task(end);
     for(int i=0; i<n; i++) {
         del_task(task[i]);
     }
     free(task);
     free(node);
 
-    return 0;
+    return err;
 }
 
 int main(int argc, char *argv[]) {
@@ -336,7 +351,10 @@ int main(int argc, char *argv[]) {
 
     check("wide parallel dag succeeds", wide_dag());
 
-    check("butterfly-2 dag succeeds", butterfly(2));
-    check("butterfly-4 dag succeeds", butterfly(4));
-    check("butterfly-6 dag succeeds", butterfly(6));
+    levels = 2;
+    check("butterfly-2 dag succeeds", butterfly());
+    levels = 4;
+    check("butterfly-4 dag succeeds", butterfly());
+    levels = 6;
+    check("butterfly-6 dag succeeds", butterfly());
 }
