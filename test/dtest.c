@@ -330,6 +330,7 @@ int butterfly() {
     }
     free(task);
     free(node);
+    free(inp);
 
     return err;
 }
@@ -353,8 +354,9 @@ int main(int argc, char *argv[]) {
 
     levels = 2;
     check("butterfly-2 dag succeeds", butterfly());
-    levels = 4;
-    check("butterfly-4 dag succeeds", butterfly());
     levels = 6;
     check("butterfly-6 dag succeeds", butterfly());
+    levels = 10;
+    check("butterfly-10 dag succeeds", butterfly());
 }
+

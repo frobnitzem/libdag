@@ -3,12 +3,16 @@
 #include <strings.h>
 #include <unistd.h>
 
-#define DEBUG
+//#define DEBUG
 
 // used by progress (but requires task->info point to an int)
 #define minfo(x) ((x)->info == NULL ? 0 : *(int *)(x)->info)
-//#define progress(...) printf(__VA_ARGS__)
+
+#ifdef DEBUG
+#define progress(...) printf(__VA_ARGS__)
+#else
 #define progress(...)
+#endif
 
 // Initial and max deque sizes for ea. thread.
 #define INIT_STACK (128)
@@ -89,13 +93,14 @@ static void push(thread_queue_t *thr, task_t *task) {
     }
 
     *thr->T = task;
-    turf_threadFenceRelease();
     thr->T++;
 }
+
 static task_t *pop(thread_queue_t *thr) {
     thr->T--;
-    turf_threadFenceRelease();
-    turf_threadFenceAcquire(); // ACQ not needed?
+    //turf_threadFenceRelease(); // release change to T
+    //turf_threadFenceAcquire(); // be sure E is there
+    __asm__ volatile ("mfence":::"memory");
     if(thr->E > thr->T) { // handle exception
         thr->T++;
         lock(&thr->L);
@@ -122,7 +127,8 @@ static task_t *steal(thread_queue_t *v) {
     task_t *ret;
     lock(&v->L); // should acquire T
     v->E++;
-    turf_threadFenceAcquire(); // be sure T is there!
+    //turf_threadFenceRelease(); // release change to E
+    //turf_threadFenceAcquire(); // be sure T is there
     if(v->E > v->T) {
         v->E--;
         unlock(&v->L);
@@ -157,6 +163,7 @@ static task_t *get_work(thread_queue_t *thr) {
                 }
             }
             usleep(random()%100);
+            //usleep(random()%10);
         }
     }
     return w;
@@ -239,7 +246,7 @@ static int add_successor(task_t *n, task_t *s) {
     return 0; // YDNBH;
 }
 
-static void enable_task(thread_queue_t *thr, task_t *s) {
+static void enable_task(thread_queue_t *thr, task_t *n, task_t *s) {
     int16_t joins = turf_fetchAdd16Relaxed(&s->joins, -1) - 1;
     if(joins == 0) {
         push(thr, s); // Enqueue task.
@@ -279,7 +286,7 @@ static int enable_successors(thread_queue_t *thr, struct Task *n) {
             turf_threadFenceAcquire(); // need to get task[i]
             continue;
         }
-        enable_task(thr, s);
+        enable_task(thr, n, s);
     }
 
     free(list);
@@ -303,6 +310,9 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     }
 
     { // seed tasks.
+        int u = -thr->rank;
+        task_t tu = {.info = &u};
+
         int avail = thr->global->initial->avail;
         int mine  = avail/nthreads + (rank < (avail%nthreads));
         int start = (avail/nthreads)*rank + MIN(avail%nthreads, rank);
@@ -310,7 +320,7 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
         for(int i=0; i<mine; i++) {
             task_t *task = thr->global->initial->task[i+start];
             // Double-check here.
-            enable_task(thr, task);
+            enable_task(thr, &tu, task);
         }
     }
 }
