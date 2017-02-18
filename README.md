@@ -9,7 +9,8 @@ where child nodes must be computed before parents but no other constraints are
 present.
 The implementation differs from others by allowing considerable
 flexibility in how the DAG manages its data so the library itself
-can provide only what is necessary to ensure correct execution order.
+can provide only what is necessary to ensure correct execution order
+-- children (aka dependencies) before parents (aka successors).
 
 
 Using the Library
@@ -97,16 +98,19 @@ tasks to be added as dependencies.
 The caller must still ensure that no cycles
 are created.
 
-If this is done, the compute phase must return a newly created
+Usually the compute task returns NULL.
+To expand the task graph, the compute phase
+instead returns a newly created
 `start` task to indicate the additional tasks.
-Tasks created during this phase are
-required to supply this `start` task for all its calls to
-`new_task`.  If this is not done, new tasks will
-probably launch prematurely because parallel execution is in-progress!
+Since parallel execution is in progress
+while expanding the task graph, it is important that
+tasks created here supply this `start` task as the second arg of
+`new_task`.  This will prevent the new tasks from
+launching prematurely.
 
-Also, the caller must arrange the current node
-to be a successor of the newly added nodes
-(reachable by some path from start).
+Also, the caller must arrange the currently running task
+to be a successor of the newly added tasks
+(reachable by some path from the new start).
 If this is not done, then the computation
 will deadlock and never complete.
 Adding extra dependencies to the `start` task is OK.
@@ -119,9 +123,9 @@ therefore be:
         if(I_should_redo(self)) { 
      	    task_t *start = new_task(NULL, NULL);
             link_task(task_of(self), start);
-	    return start; // causes immediate enqueue of self
-	}	
-	return NULL; // no expansion
+            return start; // causes immediate enqueue of self
+        }	
+        return NULL; // no expansion
     }
 
 

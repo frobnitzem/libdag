@@ -77,8 +77,8 @@ PRE_UNINSTALL = :
 POST_UNINSTALL = :
 build_triplet = @build@
 host_triplet = @host@
-TESTS = dtest.test$(EXEEXT)
-check_PROGRAMS = dtest.test$(EXEEXT)
+TESTS = dtest.test$(EXEEXT) rtest.test$(EXEEXT)
+check_PROGRAMS = dtest.test$(EXEEXT) rtest.test$(EXEEXT)
 subdir = test
 DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/Makefile.am \
 	$(top_srcdir)/build-aux/depcomp
@@ -101,6 +101,10 @@ AM_V_lt = $(am__v_lt_@AM_V@)
 am__v_lt_ = $(am__v_lt_@AM_DEFAULT_V@)
 am__v_lt_0 = --silent
 am__v_lt_1 = 
+am_rtest_test_OBJECTS = rtest.$(OBJEXT)
+rtest_test_OBJECTS = $(am_rtest_test_OBJECTS)
+rtest_test_LDADD = $(LDADD)
+rtest_test_DEPENDENCIES = ../src/libdag.la
 AM_V_P = $(am__v_P_@AM_V@)
 am__v_P_ = $(am__v_P_@AM_DEFAULT_V@)
 am__v_P_0 = false
@@ -135,8 +139,8 @@ AM_V_CCLD = $(am__v_CCLD_@AM_V@)
 am__v_CCLD_ = $(am__v_CCLD_@AM_DEFAULT_V@)
 am__v_CCLD_0 = @echo "  CCLD    " $@;
 am__v_CCLD_1 = 
-SOURCES = $(dtest_test_SOURCES)
-DIST_SOURCES = $(dtest_test_SOURCES)
+SOURCES = $(dtest_test_SOURCES) $(rtest_test_SOURCES)
+DIST_SOURCES = $(dtest_test_SOURCES) $(rtest_test_SOURCES)
 am__can_run_installinfo = \
   case $$AM_UPDATE_INFO_DIR in \
     n|no|NO) false;; \
@@ -485,6 +489,7 @@ TEST_LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) \
 		  $(top_srcdir)/build-aux/tap-driver.sh
 
 dtest_test_SOURCES = dtest.c
+rtest_test_SOURCES = rtest.c
 all: all-am
 
 .SUFFIXES:
@@ -533,6 +538,10 @@ dtest.test$(EXEEXT): $(dtest_test_OBJECTS) $(dtest_test_DEPENDENCIES) $(EXTRA_dt
 	@rm -f dtest.test$(EXEEXT)
 	$(AM_V_CCLD)$(LINK) $(dtest_test_OBJECTS) $(dtest_test_LDADD) $(LIBS)
 
+rtest.test$(EXEEXT): $(rtest_test_OBJECTS) $(rtest_test_DEPENDENCIES) $(EXTRA_rtest_test_DEPENDENCIES) 
+	@rm -f rtest.test$(EXEEXT)
+	$(AM_V_CCLD)$(LINK) $(rtest_test_OBJECTS) $(rtest_test_LDADD) $(LIBS)
+
 mostlyclean-compile:
 	-rm -f *.$(OBJEXT)
 
@@ -540,6 +549,7 @@ distclean-compile:
 	-rm -f *.tab.c
 
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/dtest.Po@am__quote@
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/rtest.Po@am__quote@
 
 .c.o:
 @am__fastdepCC_TRUE@	$(AM_V_CC)$(COMPILE) -MT $@ -MD -MP -MF $(DEPDIR)/$*.Tpo -c -o $@ $<

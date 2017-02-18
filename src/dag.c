@@ -20,6 +20,7 @@
 
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
+// dag.h: typedef struct Task task_t;
 struct Task {
     void *info; // actual user task info
     turf_atomic16_t joins;
@@ -42,6 +43,7 @@ struct GlobalInfo {
     struct TaskList *initial; // where tasks was copied to avail for convenience
 };
 
+// dag.h: typedef struct ThreadQueue thread_queue_t;
 struct ThreadQueue {
     pthread_mutex_t L;
     task_t **deque;
@@ -50,10 +52,26 @@ struct ThreadQueue {
     int deque_size; // len(deque)
     int rank;
     struct GlobalInfo *global;
+#ifdef TIME_THREADS
+    FILE *event_log;
+#endif
 };
 
+#ifdef TIME_THREADS
+#include <sys/time.h>
+static time_t dag_start_time;
+#define log_event(s) { \
+    struct timeval tp; \
+    gettimeofday(&tp, NULL); \
+    fprintf(thr->event_log, "%ld.%06d: %s\n", \
+            tp.tv_sec - dag_start_time, tp.tv_usec, s); \
+}
+#else
+#define log_event(s)
+#endif
+
 /********************* Work queue routines *****************/
-// Called by main thread when push() finds space is exhausted.
+// Called by own thread when push() finds space is exhausted.
 static void resize_deque(thread_queue_t *thr) {
     int sz;
     lock(&thr->L);
@@ -149,6 +167,7 @@ static task_t *get_work(thread_queue_t *thr) {
             return NULL;
         }
 
+        log_event("Attempting Steal");
         { // try to steal
             unsigned int k = random();
             unsigned int mod = thr->global->nthreads-1;
@@ -159,6 +178,7 @@ static task_t *get_work(thread_queue_t *thr) {
                 if(w != NULL) {
                     progress("steal success %d <- %d (%d)\n", thr->rank, v,
                                                 minfo(w));
+                    log_event("Steal Success");
                     return w;
                 }
             }
@@ -323,12 +343,27 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
             enable_task(thr, &tu, task);
         }
     }
+#ifdef TIME_THREADS
+    { char log_name[] = "event-000.log";
+      log_name[6] += (thr->rank/100)%10;
+      log_name[7] += (thr->rank/10)%10;
+      log_name[8] += (thr->rank/1)%10;
+      thr->event_log = fopen(log_name, "a");
+      if(thr->event_log == NULL) {
+          exit(1);
+      }
+      log_event("=== Init Thread ===\n");
+    }
+#endif
 }
 
 static void thread_dtor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
     free(thr->deque);
     Pthread_mutex_destroy(&thr->L);
+#ifdef TIME_THREADS
+    fclose(thr->event_log);
+#endif
 }
 
 static void *thread_work(void *data) {
@@ -338,7 +373,9 @@ static void *thread_work(void *data) {
     // TODO: optimize handling of starvation and completion conditions.
     while( (task = get_work(thr))) {
         progress("%d: working on (%d)\n", thr->rank, minfo(task));
+        log_event("Running Task");
         task_t *start = thr->global->run(task->info, thr->global->runinfo);
+        log_event("Adding Deps");
         if(start == NULL) {
             if(enable_successors(thr, task) == 0) {
                 goto final;
@@ -350,9 +387,11 @@ static void *thread_work(void *data) {
             del_task(start);
         }
     }
+    log_event("Received Term Signal");
     return NULL;
 final: // found end, signal all dag-s
     progress("Thread %d: Signaling other threads.\n", thr->rank);
+    log_event("Sending Term Signal");
     for(int k=0; k<thr->global->nthreads; k++) {
         if(k == thr->rank) continue;
         lock(&thr->global->threads[k].L);
@@ -421,6 +460,9 @@ void exec_dag(task_t *start, run_fn run, void *runinfo) {
         return;
     }
 
+#ifdef TIME_THREADS
+    dag_start_time = time(NULL);
+#endif
     run_threaded(global.nthreads, sizeof(thread_queue_t), &thread_ctor,
                  &thread_work, &thread_dtor, &global);
     free(global.initial);

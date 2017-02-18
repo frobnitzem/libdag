@@ -1,0 +1,5 @@
+2017-02-18  David M. Rogers <predictivestatmech@gmail.com>
+
+* rtest.c (check): Added new random DAG tests.
+* dag.c (TIME_THREADS): Set this to get a log for each thread.
+
