@@ -28,12 +28,36 @@ a task graph (by wrapping the user's data structures inside
 `task_t` objects, and then call `exec_dag`.  Other than the task API:
 
 ```
-  get_info  : task_t -> A
-  new_task  : A, Maybe task_t -> task_t  [ always creates a fresh task ]
-  link_task : task_t -> task_t -> Int  [First arg is parent,
-                                       second arg is child.]
-  exec_dag  : task_t -> (A -> G -> task_t) -> G -> ()
-  del_task  : task_t -> ()
+  // A is the user's node data type.
+  // G is the user's extra global info data type.
+
+  task_t *new_tasks(int n);
+
+  // Create a start task.
+  // These are special because they are never run, but
+  // serve only to add successos before immediately being
+  // deleted by exec_dag.
+  task_t *start_task();
+
+  int link_task(task_t *parent, task_t *child);
+
+  // Atomically set task info.
+  //  All new tasks begin with info set to NULL.
+  //  Tasks with info set to NULL activate their successors
+  //  as normal, but don't get passed to the user's run function.
+  //
+  //  Returns NULL if task was NULL before and the (unchanged)
+  //  current value of task_t otherwise.
+  //  This behavior allows it to be used to prevent races
+  //  when initializing nodes in parallel.
+  A *set_task_info(task_t *, A *);
+
+  //  The read-only counterpart of set_task_info.
+  A *get_task_info(task_t *x);
+
+  typedef task_t * (*run_A)(A *, G *);
+  void exec_dag(task_t *start, run_A run_fn, G);
+  void del_tasks(int n, task_t *blk);
 ```
 
 the `task_t` structures are opaque.  The user must therefore use their own
@@ -44,8 +68,14 @@ Task Execution
 --------------
 
 Using the library is really just as simple as calling
-`new_task` and `link_task` while traversing the user's
-data structure.
+`start_task`, `new_tasks` and then `link_task` while
+traversing the user's data structure.
+The function `exec_dag` runs the graph beginning at
+`start`, in child to parent order
+by calling the supplied run function
+on every node for which info is non-NULL.
+The `start` node itself is immediately deleted without being
+run -- so it's info value is irrelevant.
 
 The caller must ensure that added
 links do not create a cycle in the graph,
@@ -56,25 +86,17 @@ libdag does not check this, because it assumes the user
 will actually add a DAG.
 
 All DAGs must begin at a single `start` task and terminate
-at a single final task.
-The `start` task is a special (no-op) task
-you create with <code>task_t *start = new_task(NULL, NULL)</code>.
+at a single `end` task.
 Whenever a leaf task (i.e. a task with no dependencies)
 is encountered, it must be linked as
-the parent of the start task in order to be executed.
-The final task is executed.  If your graph produces multiple
-outputs, you'll need to make a special `end` task and link them
+the parent of the `start` task in order to be executed.
+Similarly, if your graph produces multiple
+outputs, you'll need to make a fake `end` task and link them
 as children (for detecting algorithm termination).
-
-For convenience, the second argument of `new_task`
-is added as a dependency of the current task during initialization.
-Before calling `exec_dag`, the second argument of `new_task`
-is never really needed.  However, it can save the call to
-`link_task(self, start)` that is required for all leaf nodes.
+In contrast to `start`, the `end` task is executed
+if it's info is non-NULL.
 
 To run the DAG, pass the start task to `exec_dag`.
-Note that the start task itself is immediately
-free-ed by `exec_dag` and never executed.
 
 Examples are available in the test directory, which
 includes:
@@ -83,6 +105,7 @@ includes:
 * execution of a 10-node graph
 * execution of 20,000 trivially parallel nodes
 * computation of FFTs of size 2^k
+* Merkle-tree computation on random DAGs
 
 Advanced Topics
 ===============
@@ -91,8 +114,8 @@ Expanding the task graph
 ------------------------
 
 The DAG of tasks can be expanded during the task's compute
-phase by calling `link_task` to add new dependencies
-to the current node.
+phase by calling `start_task`, `new_tasks` and/or `link_task`
+to add new dependencies to the current node.
 The code allows any new or existing
 tasks to be added as dependencies.
 The caller must still ensure that no cycles
@@ -102,18 +125,22 @@ Usually the compute task returns NULL.
 To expand the task graph, the compute phase
 instead returns a newly created
 `start` task to indicate the additional tasks.
-Since parallel execution is in progress
+
+Since parallel execution is generally in progress
 while expanding the task graph, it is important that
-tasks created here supply this `start` task as the second arg of
-`new_task`.  This will prevent the new tasks from
+tasks created here have their first call to `link_task`
+on the new start node.  This will prevent the new tasks from
 launching prematurely.
 
 Also, the caller must arrange the currently running task
 to be a successor of the newly added tasks
 (reachable by some path from the new start).
-If this is not done, then the computation
-will deadlock and never complete.
-Adding extra dependencies to the `start` task is OK.
+This is so that the successors of the current
+task will still be executed later.
+If this is not done, then the successors won't
+be activated, likely resulting in deadlock.
+Adding more successors than needed to the `start`
+task is OK.
 
 A minimal example that just re-runs the current node would
 therefore be:
@@ -121,10 +148,10 @@ therefore be:
     task_t *run(void *self, void *runinfo) {
         //... do some computation on self ...
         if(I_should_redo(self)) { 
-     	    task_t *start = new_task(NULL, NULL);
+     	    task_t *start = start_task();
             link_task(task_of(self), start);
             return start; // causes immediate enqueue of self
-        }	
+        }
         return NULL; // no expansion
     }
 

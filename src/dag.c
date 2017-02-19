@@ -1,5 +1,4 @@
 #include "dag.h"
-#include "turf/atomic.h"
 #include <strings.h>
 #include <unistd.h>
 
@@ -20,13 +19,6 @@
 
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
-// dag.h: typedef struct Task task_t;
-struct Task {
-    void *info; // actual user task info
-    turf_atomic16_t joins;
-    turf_atomicPtr_t successors; // List of dependencies
-                                 // (or NULL if node is complete).
-};
 struct TaskList {
     turf_atomic16_t tasks;
     uint16_t avail; // max available space
@@ -372,10 +364,16 @@ static void *thread_work(void *data) {
 
     // TODO: optimize handling of starvation and completion conditions.
     while( (task = get_work(thr))) {
+        task_t *start = NULL;
+        void *info = get_task_info(task);
+
         progress("%d: working on (%d)\n", thr->rank, minfo(task));
-        log_event("Running Task");
-        task_t *start = thr->global->run(task->info, thr->global->runinfo);
-        log_event("Adding Deps");
+        if(info != NULL) {
+            log_event("Running Task");
+            start = thr->global->run(get_task_info(task),
+                                             thr->global->runinfo);
+            log_event("Adding Deps");
+        }
         if(start == NULL) {
             if(enable_successors(thr, task) == 0) {
                 goto final;
@@ -384,7 +382,7 @@ static void *thread_work(void *data) {
             if(enable_successors(thr, start) == 0) {
                 goto final;
             }
-            del_task(start);
+            del_tasks(1, start);
         }
     }
     log_event("Received Term Signal");
@@ -403,34 +401,41 @@ final: // found end, signal all dag-s
 }
 
 /*************** top-level API ****************/
-void *get_info(task_t *task) {
-    return task->info;
+void *get_task_info(task_t *task) {
+    return turf_loadPtr(&task->info, TURF_MEMORY_ORDER_ACQUIRE);
+}
+void *set_task_info(task_t *task, void *info) {
+    return turf_compareExchangePtr(&task->info, NULL, info,
+                                   TURF_MEMORY_ORDER_RELEASE);
 }
 
-void del_task(task_t *task) {
-    struct TaskList *list = turf_loadPtr(&task->successors,
-                                         TURF_MEMORY_ORDER_ACQUIRE);
-    if(list) free(list); // incomplete?
+void del_tasks(int n, task_t *task) {
+    for(int i=0; i<n; i++) {
+        struct TaskList *list = turf_loadPtr(&task[i].successors,
+                                             TURF_MEMORY_ORDER_ACQUIRE);
+        if(list) free(list); // incomplete?
+    }
     free(task);
 }
 
-// OK to send NULL for start before running.
-// During execution, start should always be non-NULL
-// to prevent premature execution.
-task_t *new_task(void *a, task_t *start) {
-    task_t *task = malloc(sizeof(task_t));
+static inline void init_task(task_t *task) {
     struct TaskList *list = calloc(sizeof(struct TaskList)
                                    + 2*sizeof(task_t *), 1);
     list->avail = 2;
 
-    task->info = a;
+    turf_storePtrRelaxed(&task->info, NULL);
     turf_storePtrRelaxed(&task->successors, list);
     turf_store16Relaxed(&task->joins, 0);
-
-    if(start != NULL) {
-        link_task(task, start);
+}
+task_t *new_tasks(int n) {
+    task_t *task = calloc(sizeof(task_t), n);
+    for(int i=0; i<n; i++) {
+        init_task(task+i);
     }
     return task;
+}
+task_t *start_task() {
+    return new_tasks(1);
 }
 
 // Returns '1' if the dep is incomplete (and thus linking was
@@ -451,7 +456,7 @@ void exec_dag(task_t *start, run_fn run, void *runinfo) {
     // TODO: Create global mutex/condition
     // for handling task starvation and determining whether
     // work is complete.
-    del_task(start);
+    del_tasks(1, start);
 
     global.initial->avail = turf_load16Relaxed(&global.initial->tasks);
     if(global.initial->avail < 1) {

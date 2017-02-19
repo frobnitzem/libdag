@@ -2,4 +2,10 @@
 
 * rtest.c (check): Added new random DAG tests.
 * dag.c (TIME_THREADS): Set this to get a log for each thread.
+* dag.c (task_t): Added explicit contents to make addressing
+simpler.  Library users should still not manually access their contents.
+* dag.c (new_task): replaced with new_tasks, start_task and set_task_info
+* dag.c (del_task): replaced with del_tasks
+* dag.c (get_info): replaced with get_task_info
+* dag.c (set_task_info): new function with compare-exchange semantics
 

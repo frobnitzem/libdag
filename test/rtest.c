@@ -2,11 +2,13 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <pthread.h>
+
 #include <dag.h>
 #include <time.h>
 #include "test.h"
 
-#define USLEEP 1000
+#define USLEEP 100
 
 // from code.google.com/p/smhasher/wiki/MurmurHash3
 inline static uint32_t integerHash(uint32_t h) {
@@ -39,15 +41,19 @@ int fill_widths(int wid[MAXRANK], int ranks, int min_wid, int max_wid) {
     return nodes;
 }
 
-node_t *gen_dag(int nodes, int ranks, int pct_edges, int wid[MAXRANK]) {
+node_t *gen_dag(int nodes, int ranks, int pct_edges, int pct_lazy,
+                int wid[MAXRANK]) {
     node_t *node;
 
     if( (node = malloc(sizeof(node_t)*nodes)) == NULL) {
         return NULL;
     }
     for(int i=0; i<nodes; i++) { // initialize nodes.
-        node[i].id = i;
+        node[i].id = i+1;
         node[i].nchild = node[i].nparent = 0;
+        if(random() % 100 < pct_lazy) {
+            node[i].id = -(i+1);
+        }
     }
     nodes = 0;
 
@@ -74,14 +80,40 @@ node_t *gen_dag(int nodes, int ranks, int pct_edges, int wid[MAXRANK]) {
     return node;
 }
 
+// recursively add non-lazy children of current task
+// task[0] is the end.
+void add_task(node_t *dag, task_t **task, task_t *start, int i) {
+    /*node_t *n = dag + i;
+
+    task[i+1] = new_tasks(n, start);
+    for(int j=0; j<n->nchild; j++) {
+        int c = n->child[j];
+        if(dag[c].id > 0 && task[c+1] == NULL) {
+            add_task(dag, task, start, c);
+        }
+        link_task(task[i+1], task[c+1]);
+    }
+
+    if(n->nparent == 0)
+        link_task(task[0], task[i+1]);*/
+}
+
 task_t *hash_node(void *x, void *runinfo) {
-    node_t *n = (node_t *)x;
-    task_t **task = (task_t **)runinfo;
     if(x == NULL) return NULL;
 
-    int val = n->id;
+    node_t *n = (node_t *)x;
+    node_t *dag = n - (n->id > 0 ? n->id : -n->id) + 1;
+    task_t **task = (task_t **)runinfo;
+
+    /*if(n->id < 0) {
+        task_t *start = new_task(NULL, NULL);
+        n->id = -n->id;
+        add_children(dag, task, start, n->id - 1);
+        return start;
+    }*/
+    int val = n->id < 0 ? -n->id : n->id;
     for(int j=0; j<n->nchild; j++) {
-        node_t *child = (node_t *)get_info(task[n->child[j]]);
+        node_t *child = dag + n->child[j];
         val = integerHash(val | (child->id << 16));
     }
 #if USLEEP > 0
@@ -96,7 +128,7 @@ end:
 }
 
 int check_hash(int i, node_t *dag) {
-    int val = i;
+    int val = i+1;
     node_t *n = dag+i;
 
     for(int j=0; j<n->nchild; j++) {
@@ -119,48 +151,43 @@ int check_dag(int nodes, node_t *dag) {
     return 0;
 }
 
-int test_dag(int ranks, int pct_edges, int min_wid, int max_wid) {
+int test_dag(int ranks, int pct_edges, int pct_lazy, int min_wid, int max_wid) {
     int wid[MAXRANK];
     int ret, edges=0;
     int nodes = fill_widths(wid, ranks, min_wid, max_wid);
-    node_t *dag = gen_dag(nodes, ranks, pct_edges, wid);
-    task_t **task = dag ? malloc(sizeof(task_t *)*nodes) : NULL;
+    node_t *dag = gen_dag(nodes, ranks, pct_edges, pct_lazy, wid);
+    task_t *task = dag ? new_tasks(nodes+1) : NULL;
 
     if(dag == NULL || task == NULL) {
         printf("# memory error!\n");
         return 1;
     }
-    task_t *start = new_task(NULL, NULL);
-    task_t *end   = new_task(NULL, NULL);
+    task_t *start = start_task();
 
     // create task_t-s from node_t-s
     for(int i=0; i<nodes; i++) {
+        set_task_info(&task[i+1], &dag[i]);
+
         if(dag[i].nchild == 0) {
-            task[i] = new_task(&dag[i], start);
-        } else {
-            task[i] = new_task(&dag[i], NULL);
+            link_task(&task[i+1], start);
         }
         if(dag[i].nparent == 0) { 
-            link_task(end, task[i]);
+            link_task(&task[0], &task[i+1]);
         }
-    }
-    for(int i=0; i<nodes; i++) {
+
         for(int j=0; j<dag[i].nchild; j++) {
             edges++;
-            link_task(task[i], task[dag[i].child[j]]);
+            link_task(&task[i+1], &task[dag[i].child[j]+1]);
         }
     }
     printf("# %d nodes, %d edges\n", nodes, edges);
 
     exec_dag(start, hash_node, task);
-    for(int i=0; i<nodes; i++) {
-        del_task(task[i]);
-    }
-    del_task(end);
+
+    del_tasks(nodes+1, task);
 
     ret = check_dag(nodes, dag);
     free(dag);
-    free(task);
     return ret;
 }
 
@@ -168,12 +195,18 @@ int main(int argc, char *argv[]) {
     //srandom(time(NULL));
     srandom(12);
 
-    printf("1..5\n");
-    check("random dag has correct execution order", test_dag(5, 30, 1, 5));
-    check("random dag has correct execution order", test_dag(20, 30, 1, 5));
-    check("random dag has correct execution order", test_dag(80, 30, 1, 5));
-    check("random dag has correct execution order", test_dag(160, 30, 1, 5));
-    check("random dag has correct execution order", test_dag(320, 30, 1, 5));
+    printf("1..10\n");
+    check("random dag has correct execution order", test_dag(5, 30, 0, 1, 5));
+    check("random dag has correct execution order", test_dag(20, 30, 0, 1, 5));
+    check("random dag has correct execution order", test_dag(80, 30, 0, 1, 5));
+    check("random dag has correct execution order", test_dag(160, 30, 0, 1, 5));
+    check("random dag has correct execution order", test_dag(320, 30, 0, 1, 5));
+
+    check("lazy dag has correct execution order", test_dag(5, 30, 20, 1, 5));
+    check("lazy dag has correct execution order", test_dag(20, 30, 20, 1, 5));
+    check("lazy dag has correct execution order", test_dag(80, 30, 20, 1, 5));
+    check("lazy dag has correct execution order", test_dag(160, 30, 20, 1, 5));
+    check("lazy dag has correct execution order", test_dag(320, 30, 20, 1, 5));
 
     return 0;
 }

@@ -89,12 +89,14 @@ end:
 
 // test 4
 int single_dag() {
-    task_t *start = new_task(NULL, NULL);
+    task_t *start = start_task();
     oper_t op = {0, 1, NULL, NULL};
-    task_t *end = new_task(&op, start);
+    task_t *end = new_tasks(1);
+    link_task(end, start);
+    set_task_info(end, &op);
 
     exec_dag(start, hash_two, NULL);
-    del_task(end);
+    del_tasks(1, end);
 
     return 0;
 }
@@ -143,29 +145,28 @@ void setup10(oper_t dag[10]) {
     
 int dag10() {
     oper_t dag[10];
-    task_t *task[10];
+    task_t *task = new_tasks(10);
     setup10(dag);
-    task_t *start = new_task(NULL, NULL);
+    task_t *start = start_task();
 
     // create task_t-s from oper_t-s
     for(int i=0; i<10; i++) {
+        set_task_info(task+i, &dag[i]);
+
         if(dag[i].a == NULL) { // no deps
-            task[i] = new_task(&dag[i], start);
+            link_task(task+i, start);
         } else { // Since we know op-s are in topo-sort order,
             int j = dag+i - dag[i].a; // dag[i] > dag[i].a,b.
-            task[i] = new_task(&dag[i], NULL);
-            link_task(task[i], task[i-j]);
+            link_task(&task[i], &task[i-j]);
             if(dag[i].b != NULL) {
                 int j = dag+i - dag[i].b;
-                link_task(task[i], task[i-j]);
+                link_task(&task[i], &task[i-j]);
             }
         }
     }
 
     exec_dag(start, hash_two, NULL);
-    for(int i=0; i<10; i++) {
-        del_task(task[i]);
-    }
+    del_tasks(10, task);
 
     return check10(dag);
 }
@@ -174,21 +175,21 @@ int dag10() {
 task_t *noop(void *a, void *b) {
     return NULL;
 };
-// TODO: malloc alternative for new_task
 int wide_dag() {
     int ret = 1, j = 0, width = 20000;
     int *ids = malloc(sizeof(int)*width);
-    task_t *start = new_task(NULL, NULL);
-    task_t *end = new_task(NULL, NULL);
-    task_t **tasks = malloc(sizeof(task_t *)*width);
-    if(tasks == NULL) {
+    task_t *start = start_task();
+    task_t *end = new_tasks(1);
+    task_t *tasks = new_tasks(width);
+    if(end == NULL || tasks == NULL) {
         printf("# memory alloc error.\n");
         return 1;
     }
     for(int i=0; i<width; i++) {
         ids[i] = i+1;
-        tasks[i] = new_task(&ids[i], start);
-        j += link_task(end, tasks[i]);
+        link_task(tasks+i, start);
+        set_task_info(tasks+i, &ids[i]);
+        j += link_task(end, tasks+i);
     }
     printf("# linked %d tasks\n", j);
     if(j != width) {
@@ -199,11 +200,8 @@ int wide_dag() {
     ret = 0;
 
 err:
-    for(int i=0; i<width; i++) {
-        del_task(tasks[i]);
-    }
-    del_task(end);
-    free(tasks);
+    del_tasks(width, tasks);
+    del_tasks(1, end);
     free(ids);
 
     return ret;
@@ -217,7 +215,7 @@ struct FFTNode {
     double re, im;
 };
 
-task_t **first_task;
+task_t *first_task;
 int levels;
 double *inp;
 
@@ -230,13 +228,14 @@ double *inp;
 // SUBTASKS(k) = 1<<k + 2*SUBTASKS(k-1).
 //
 // Note: Setup is likely more expensive than actually running the DAG...
-void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k,
+void mk_butterfly(fft_node_t *node, task_t *task, task_t *start, int k,
                     unsigned addr) {
     if(k == 0) {
         // node->re, im contain the input data.
-        task[0] = new_task(node, start);
+        link_task(task, start);
+        set_task_info(task, node);
         node->l = NULL; // We could start at k=1, but I'm lazy.
-        //printf("task[%d] : 0,0 = %p\n", (task-first_task), task[0]);
+        //printf("task[%d] : 0,0 = %p\n", (task-first_task), task);
         node->re = inp[addr];
         node->im = 0.0;
         node->id = task-first_task;
@@ -259,12 +258,13 @@ void mk_butterfly(fft_node_t *node, task_t **task, task_t *start, int k,
         node[i].id = task-first_task + i;
         //printf("Node %d: %d,%d = %f\n", node[i].id, k, i, node[i].im);
 
-        task[i] = new_task(node+i, task[skipL+off]);
+        set_task_info(task+i, node+i);
+        link_task(task+i, &task[skipL+off]);
         // TODO: Sending the wrong addresses to link_task
         // is painful to debug.  I think the hash-map for node id-s is
         // the way to go.
-        //printf("task[%d] : %d,%d = %p\n", task-first_task+i, k, i, task[i]);
-        link_task(task[i], task[skipR+off]);
+        //printf("task[%d] : %d,%d = %p\n", task-first_task+i, k, i, task+i);
+        link_task(task+i, &task[skipR+off]);
     }
 }
 task_t *fft_step(void *info, void *global) {
@@ -285,9 +285,13 @@ int butterfly() {
 
     inp = calloc(n, sizeof(double));
     fft_node_t *node = malloc(sizeof(fft_node_t)*SUBTASKS(levels));
-    task_t **task = malloc(sizeof(task_t *)*SUBTASKS(levels));
-    task_t *start = new_task(NULL, NULL);
-    task_t *end = new_task(NULL, NULL);
+    task_t *task = new_tasks(SUBTASKS(levels));
+    task_t *start = start_task(NULL, NULL);
+    task_t *end = new_tasks(1);
+    if(inp == NULL || task == NULL || node == NULL || end == NULL) {
+        perror("# memory error");
+        return 1;
+    }
 
     for(int i=1; i<n; i += 2) {
         inp[i] = 1.0;
@@ -296,13 +300,13 @@ int butterfly() {
     first_task = task;
     mk_butterfly(node, task, start, levels, 0);
     for(int i=0; i<n; i++) {
-        link_task(end, task[i]);
+        link_task(end, task+i);
     }
 
     exec_dag(start, fft_step, NULL);
     // test result
     if(fabs(node[0].re - n2) > 1e-8) {
-        printf("# FFT 0-channel %f != %d\n", node[0].re, n, n2);
+        printf("# FFT 0-channel %f != %d\n", node[0].re, n);
         err++;
     }
     if(fabs(node[n2].re + n2) > 1e-8) {
@@ -324,11 +328,8 @@ int butterfly() {
     }
 
     n = SUBTASKS(levels);
-    del_task(end);
-    for(int i=0; i<n; i++) {
-        del_task(task[i]);
-    }
-    free(task);
+    del_tasks(1, end);
+    del_tasks(n, task);
     free(node);
     free(inp);
 
