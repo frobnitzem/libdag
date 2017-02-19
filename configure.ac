@@ -12,6 +12,7 @@ AC_CONFIG_SRCDIR([src/dag.c])
 AC_PROG_CC
 AM_PROG_AR
 AC_PROG_LIBTOOL
+AC_PROG_CC_C99
 
 # Check for libraries.
 #AX_PTHREAD([AC_DEFINE([HAVE_PTHREAD], [1], [yup, pthreads])], [

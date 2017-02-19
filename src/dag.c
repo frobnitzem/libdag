@@ -1,6 +1,9 @@
-#include "dag.h"
 #include <strings.h>
 #include <unistd.h>
+
+// must include this first to get contents of task_t
+#include "turf/atomic.h"
+#include "dag.h"
 
 //#define DEBUG
 
@@ -186,7 +189,7 @@ static task_t *get_work(thread_queue_t *thr) {
 //   returning 0 on success,
 //          or 1 if resize is needed,
 //          or 2 if resize is needed and this thread should do it.
-static int add_task(struct TaskList *list, struct Task *s) {
+static int add_task(struct TaskList *list, task_t *s) {
     uint16_t i = turf_fetchAdd16Relaxed(&list->tasks, 1);
     if(i >= list->avail) {
         return 1 + (i == list->avail);
@@ -199,10 +202,10 @@ static int add_task(struct TaskList *list, struct Task *s) {
 
 // Called when old->tasks == old->avail
 // Speculatively create a larger list.
-static struct TaskList *grow_tasklist(struct Task *n, struct TaskList *old) {
+static struct TaskList *grow_tasklist(task_t *n, struct TaskList *old) {
     int sz = old->avail*2; //old->avail < 4 ? 8 : old->avail*2;
     struct TaskList *list = calloc(sizeof(struct TaskList)
-                                  + sz*sizeof(struct Task *), 1);
+                                  + sz*sizeof(task_t *), 1);
     for(int i=0; i<old->avail; i++) {
         if( (list->task[i] = old->task[i]) == NULL) {
             //free(list); // incomplete write
@@ -277,7 +280,7 @@ static void enable_task(thread_queue_t *thr, task_t *n, task_t *s) {
 //   Only one thread (the running thread) will ever call this routine,
 //   and it only occurs once for each task.
 //   It processes all the successors of the task.
-static int enable_successors(thread_queue_t *thr, struct Task *n) {
+static int enable_successors(thread_queue_t *thr, task_t *n) {
     struct TaskList *list = turf_exchangePtr(&n->successors, NULL,
                                              TURF_MEMORY_ORDER_ACQUIRE);
     // Stop further writes to the list.
@@ -292,7 +295,7 @@ static int enable_successors(thread_queue_t *thr, struct Task *n) {
 
     int16_t i;
     for(i=0; i<tasks; i++) {
-        struct Task *s = list->task[i];
+        task_t *s = list->task[i];
         if(s == NULL) {
             i--;
             turf_threadFenceAcquire(); // need to get task[i]
@@ -311,7 +314,7 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
 
     Pthread_mutex_init(&thr->L, NULL);
-    thr->deque = malloc(sizeof(struct Task *)*INIT_STACK);
+    thr->deque = malloc(sizeof(task_t *)*INIT_STACK);
     thr->T = thr->H = thr->E = thr->deque;
 
     thr->deque_size = INIT_STACK;
