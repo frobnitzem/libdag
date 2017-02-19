@@ -80,37 +80,62 @@ node_t *gen_dag(int nodes, int ranks, int pct_edges, int pct_lazy,
     return node;
 }
 
-// recursively add non-lazy children of current task
-// task[0] is the end.
-void add_task(node_t *dag, task_t **task, task_t *start, int i) {
-    /*node_t *n = dag + i;
+void print_dag(int nodes, node_t *node) {
+    printf("digraph {\n");
+    for(int i=0; i<nodes; i++) {
+        printf("// node %d (%d parents)\n", node[i].id, node[i].nparent);
+        for(int j=0; j<node[i].nchild; j++) {
+            printf ("  %d -> %d;\n", node[i].id, node[node[i].child[j]].id);
+        }
+    }
+    printf("}\n");
+}
 
-    task[i+1] = new_tasks(n, start);
+// recursively add non-lazy children of current task
+void add_task(node_t *dag, task_t *task, task_t *start, int i) {
+    node_t *n = dag + i;
+    int nchild = 0;
+
+    // set => already added deps
+    if(set_task_info(task+i+1, dag+i) != NULL) {
+        return;
+    }
+    link_task(task+i+1, start); // link all new tasks to start
+
+    if(dag[i].id < 0) { // don't (yet) add children of lazy node
+        return;
+    }
     for(int j=0; j<n->nchild; j++) {
         int c = n->child[j];
-        if(dag[c].id > 0 && task[c+1] == NULL) {
-            add_task(dag, task, start, c);
-        }
-        link_task(task[i+1], task[c+1]);
+        add_task(dag, task, start, c);
+        nchild += link_task(&task[i+1], &task[c+1]);
     }
 
+    /* only used in start-up phase, where it's done already.
     if(n->nparent == 0)
-        link_task(task[0], task[i+1]);*/
+        link_task(task[0], task[i+1]);
+        */
 }
 
 task_t *hash_node(void *x, void *runinfo) {
-    if(x == NULL) return NULL;
-
     node_t *n = (node_t *)x;
     node_t *dag = n - (n->id > 0 ? n->id : -n->id) + 1;
-    task_t **task = (task_t **)runinfo;
+    task_t *task = (task_t *)runinfo;
 
-    /*if(n->id < 0) {
-        task_t *start = new_task(NULL, NULL);
-        n->id = -n->id;
-        add_children(dag, task, start, n->id - 1);
+    printf("%d\n", n->id);
+    if(n->id < 0) {
+        task_t *start = start_task();
+        n->id = -n->id; // activate!
+
+        // Don't start running this until I'm done!
+        link_task(task+n->id, start);
+        for(int j=0; j<n->nchild; j++) {
+            int ch = n->child[j];
+            add_task(dag, task, start, ch);
+            link_task(task+n->id, task+ch+1); // since these links enable self
+        }
         return start;
-    }*/
+    }
     int val = n->id < 0 ? -n->id : n->id;
     for(int j=0; j<n->nchild; j++) {
         node_t *child = dag + n->child[j];
@@ -158,6 +183,8 @@ int test_dag(int ranks, int pct_edges, int pct_lazy, int min_wid, int max_wid) {
     node_t *dag = gen_dag(nodes, ranks, pct_edges, pct_lazy, wid);
     task_t *task = dag ? new_tasks(nodes+1) : NULL;
 
+    print_dag(nodes, dag);
+
     if(dag == NULL || task == NULL) {
         printf("# memory error!\n");
         return 1;
@@ -166,18 +193,9 @@ int test_dag(int ranks, int pct_edges, int pct_lazy, int min_wid, int max_wid) {
 
     // create task_t-s from node_t-s
     for(int i=0; i<nodes; i++) {
-        set_task_info(&task[i+1], &dag[i]);
-
-        if(dag[i].nchild == 0) {
-            link_task(&task[i+1], start);
-        }
         if(dag[i].nparent == 0) { 
+            add_task(dag, task, start, i);
             link_task(&task[0], &task[i+1]);
-        }
-
-        for(int j=0; j<dag[i].nchild; j++) {
-            edges++;
-            link_task(&task[i+1], &task[dag[i].child[j]+1]);
         }
     }
     printf("# %d nodes, %d edges\n", nodes, edges);

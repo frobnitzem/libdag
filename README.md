@@ -39,6 +39,9 @@ a task graph (by wrapping the user's data structures inside
   // deleted by exec_dag.
   task_t *start_task();
 
+  // Atomically set parent as a successor of child.
+  // This returns 1 if a link is created,
+  // or else 0 if the child has already executed.
   int link_task(task_t *parent, task_t *child);
 
   // Atomically set task info.
