@@ -1,6 +1,6 @@
 ACLOCAL_AMFLAGS = -I m4
 
-LDADD = ../src/libdag.la
+LDADD = ../src/libdag.la -lm -lpthread
 AM_CPPFLAGS = -I$(top_srcdir)/src
 
 TEST_LOG_DRIVER = env AM_TAP_AWK='$(AWK)' $(SHELL) \

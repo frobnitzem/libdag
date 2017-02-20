@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 
 #include <pthread.h>
@@ -122,7 +123,7 @@ task_t *hash_node(void *x, void *runinfo) {
     node_t *dag = n - (n->id > 0 ? n->id : -n->id) + 1;
     task_t *task = (task_t *)runinfo;
 
-    printf("%d\n", n->id);
+    //printf("%d\n", n->id);
     if(n->id < 0) {
         task_t *start = start_task();
         n->id = -n->id; // activate!
@@ -178,12 +179,12 @@ int check_dag(int nodes, node_t *dag) {
 
 int test_dag(int ranks, int pct_edges, int pct_lazy, int min_wid, int max_wid) {
     int wid[MAXRANK];
-    int ret, edges=0;
+    int ret;
     int nodes = fill_widths(wid, ranks, min_wid, max_wid);
     node_t *dag = gen_dag(nodes, ranks, pct_edges, pct_lazy, wid);
     task_t *task = dag ? new_tasks(nodes+1) : NULL;
 
-    print_dag(nodes, dag);
+    //print_dag(nodes, dag);
 
     if(dag == NULL || task == NULL) {
         printf("# memory error!\n");
@@ -198,7 +199,7 @@ int test_dag(int ranks, int pct_edges, int pct_lazy, int min_wid, int max_wid) {
             link_task(&task[0], &task[i+1]);
         }
     }
-    printf("# %d nodes, %d edges\n", nodes, edges);
+    printf("# %d nodes\n", nodes);
 
     exec_dag(start, hash_node, task);
 

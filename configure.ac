@@ -14,11 +14,17 @@ AM_PROG_AR
 AC_PROG_LIBTOOL
 AC_PROG_CC_C99
 
-# Check for libraries.
-#AX_PTHREAD([AC_DEFINE([HAVE_PTHREAD], [1], [yup, pthreads])], [
-#            AC_MSG_ERROR([libdag requires pthreads])
-#])
-#AX_PTHREAD
+dnl Check for libraries.
+dnl ACX_PTHREAD
+
+AX_PTHREAD([AC_DEFINE([HAVE_PTHREAD], [1], [pthreads])],
+           [AC_MSG_ERROR([libdag requires pthreads])
+])
+
+LIBS="$PTHREAD_LIBS $LIBS"
+CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
+CC="$PTHREAD_CC"
+
 #LIBS="$PTHREAD_LIBS $LIBS"
 #CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
 #CC="$PTHREAD_CC"

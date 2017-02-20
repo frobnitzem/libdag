@@ -111,9 +111,9 @@ static void push(thread_queue_t *thr, task_t *task) {
 
 static task_t *pop(thread_queue_t *thr) {
     thr->T--;
-    //turf_threadFenceRelease(); // release change to T
-    //turf_threadFenceAcquire(); // be sure E is there
     __asm__ volatile ("mfence":::"memory");
+    //turf_swap(&thr->E, &E, TURF_MEMORY_ORDER_RELAXED);
+
     if(thr->E > thr->T) { // handle exception
         thr->T++;
         lock(&thr->L);
