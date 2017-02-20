@@ -1,31 +1,20 @@
 #ifndef LIBDAG_C_H
 #define LIBDAG_C_H
 
+#include <stdatomic.h>
+
 #include "dag_thread.h"
 
 // Internal data structure wrapping each task in libdag.
 typedef struct ThreadQueue thread_queue_t;
-typedef union Task task_t;
+typedef struct Task task_t;
 
-#define TASK_T_SIZE (sizeof(void *)*3)
-
-#ifdef TURF_C_ATOMIC_H
-// while compiling library
-union Task {
-    struct {
-        turf_atomicPtr_t info; // actual user task info
-        turf_atomicPtr_t successors; // List of dependencies
-                                     // (or NULL if node is complete).
-        turf_atomic16_t joins;
-    };
-    const char data[TASK_T_SIZE];
+struct Task {
+    _Atomic(void *) info; // actual user task info
+    _Atomic(void *) successors; // List of dependencies
+                                // (or NULL if node is complete).
+    _Atomic(int) joins;
 };
-#else
-// while using library
-union Task {
-    const char data[TASK_T_SIZE];
-};
-#endif
 
 // Execute a single task (may add new nodes).
 typedef task_t *(*run_fn)(void *a, void *runinfo);

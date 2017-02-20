@@ -1,8 +1,8 @@
 #include <strings.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
-// must include this first to get contents of task_t
-#include "turf/atomic.h"
 #include "dag.h"
 
 //#define DEBUG
@@ -23,8 +23,8 @@
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
 struct TaskList {
-    turf_atomic16_t tasks;
-    uint16_t avail; // max available space
+    _Atomic(int) tasks;
+    int avail; // max available space
     task_t *task[];
 };
 
@@ -112,7 +112,8 @@ static void push(thread_queue_t *thr, task_t *task) {
 static task_t *pop(thread_queue_t *thr) {
     thr->T--;
     __asm__ volatile ("mfence":::"memory");
-    //turf_swap(&thr->E, &E, TURF_MEMORY_ORDER_RELAXED);
+    usleep(100);
+    //atomic_swap(&thr->E, &E, TURF_MEMORY_ORDER_RELAXED);
 
     if(thr->E > thr->T) { // handle exception
         thr->T++;
@@ -140,8 +141,8 @@ static task_t *steal(thread_queue_t *v) {
     task_t *ret;
     lock(&v->L); // should acquire T
     v->E++;
-    //turf_threadFenceRelease(); // release change to E
-    //turf_threadFenceAcquire(); // be sure T is there
+    //atomic_threadFenceRelease(); // release change to E
+    //atomic_threadFenceAcquire(); // be sure T is there
     if(v->E > v->T) {
         v->E--;
         unlock(&v->L);
@@ -190,12 +191,12 @@ static task_t *get_work(thread_queue_t *thr) {
 //          or 1 if resize is needed,
 //          or 2 if resize is needed and this thread should do it.
 static int add_task(struct TaskList *list, task_t *s) {
-    uint16_t i = turf_fetchAdd16Relaxed(&list->tasks, 1);
+    int i = atomic_fetch_add_explicit(&list->tasks, 1, memory_order_relaxed);
     if(i >= list->avail) {
         return 1 + (i == list->avail);
     }
     // incr before storing s
-    turf_fetchAdd16(&s->joins, 1, TURF_MEMORY_ORDER_ACQUIRE);
+    atomic_fetch_add_explicit(&s->joins, 1, memory_order_acquire);
     list->task[i] = s;
     return 0;
 }
@@ -209,23 +210,26 @@ static struct TaskList *grow_tasklist(task_t *n, struct TaskList *old) {
     for(int i=0; i<old->avail; i++) {
         if( (list->task[i] = old->task[i]) == NULL) {
             //free(list); // incomplete write
-            //return turf_loadPtrRelaxed(&n->successors);
+            //return atomic_load_explicit(&n->successors, memory_order_relaxed);
 
             // The writing thread promised they would fill this in...
             // we may be in an infinite loop otherwise.
             // To avoid waiting on a magical variable propagating here,
             i--;
-            turf_threadFenceAcquire(); // need to get task[i]
+            // need to get task[i]
+            atomic_thread_fence(memory_order_acquire);
             continue;
         }
     }
-    turf_store16Relaxed(&list->tasks, old->avail);
+    atomic_store_explicit(&list->tasks, old->avail, memory_order_relaxed);
     list->avail = sz;
 
     { // check to see if another thread has replaced the list meanwhile
-        struct TaskList *prev = turf_compareExchangePtr(
-                &n->successors, old, list, TURF_MEMORY_ORDER_RELEASE);
-        if(prev == old) { // succeed.
+        struct TaskList *prev = old;
+        if(atomic_compare_exchange_strong_explicit(
+                        &n->successors, &prev, list, memory_order_release,
+                                                   memory_order_relaxed)) {
+            // succeed.
             progress("New successor list creation succeeds.\n");
             free(old);
             return list;
@@ -241,7 +245,7 @@ static struct TaskList *grow_tasklist(task_t *n, struct TaskList *old) {
 //  returns 0 if `n` is already complete (no addition possible)
 //  or 1 after addition.
 static int add_successor(task_t *n, task_t *s) {
-    struct TaskList *list = turf_loadPtrRelaxed(&n->successors);
+    struct TaskList *list = atomic_load_explicit(&n->successors, memory_order_relaxed);
     int r = 0;
 
     while(1) {
@@ -255,14 +259,15 @@ static int add_successor(task_t *n, task_t *s) {
             return 1; // It just happened.
         }
 
-        list = turf_loadPtrRelaxed(&n->successors); // double-check.
+        // double-check.
+        list = atomic_load_explicit(&n->successors, memory_order_relaxed);
     };
 
     return 0; // YDNBH;
 }
 
 static void enable_task(thread_queue_t *thr, task_t *n, task_t *s) {
-    int16_t joins = turf_fetchAdd16Relaxed(&s->joins, -1) - 1;
+    int joins = atomic_fetch_add_explicit(&s->joins, -1, memory_order_relaxed)-1;
     if(joins == 0) {
         push(thr, s); // Enqueue task.
     }
@@ -281,8 +286,8 @@ static void enable_task(thread_queue_t *thr, task_t *n, task_t *s) {
 //   and it only occurs once for each task.
 //   It processes all the successors of the task.
 static int enable_successors(thread_queue_t *thr, task_t *n) {
-    struct TaskList *list = turf_exchangePtr(&n->successors, NULL,
-                                             TURF_MEMORY_ORDER_ACQUIRE);
+    struct TaskList *list = atomic_exchange_explicit(&n->successors, NULL,
+                                                     memory_order_acquire);
     // Stop further writes to the list.
 #ifdef DEBUG
     if(list == NULL) { // sanity check.
@@ -291,14 +296,15 @@ static int enable_successors(thread_queue_t *thr, task_t *n) {
         exit(1);
     }
 #endif
-    int16_t tasks = turf_fetchAdd16Relaxed(&list->tasks, list->avail+1);
+    int tasks = atomic_fetch_add_explicit(&list->tasks, list->avail+1,
+                                              memory_order_relaxed);
 
-    int16_t i;
+    int i;
     for(i=0; i<tasks; i++) {
         task_t *s = list->task[i];
         if(s == NULL) {
             i--;
-            turf_threadFenceAcquire(); // need to get task[i]
+            atomic_thread_fence(memory_order_acquire);
             continue;
         }
         enable_task(thr, n, s);
@@ -399,23 +405,25 @@ final: // found end, signal all dag-s
         thr->global->threads[k].E += MAX_STACK;
         unlock(&thr->global->threads[k].L);
     }
-    turf_threadFenceRelease();
+    atomic_thread_fence(memory_order_release);
     return NULL;
 }
 
 /*************** top-level API ****************/
 void *get_task_info(task_t *task) {
-    return turf_loadPtr(&task->info, TURF_MEMORY_ORDER_ACQUIRE);
+    return atomic_load_explicit(&task->info, memory_order_acquire);
 }
 void *set_task_info(task_t *task, void *info) {
-    return turf_compareExchangePtr(&task->info, NULL, info,
-                                   TURF_MEMORY_ORDER_RELEASE);
+    void *out = NULL;
+    atomic_compare_exchange_strong_explicit(&task->info, &out, info,
+                                    memory_order_release, memory_order_relaxed);
+    return out;
 }
 
 void del_tasks(int n, task_t *task) {
     for(int i=0; i<n; i++) {
-        struct TaskList *list = turf_loadPtr(&task[i].successors,
-                                             TURF_MEMORY_ORDER_ACQUIRE);
+        struct TaskList *list = atomic_load_explicit(&task[i].successors,
+                                                     memory_order_acquire);
         if(list) free(list); // incomplete?
     }
     free(task);
@@ -426,9 +434,9 @@ static inline void init_task(task_t *task) {
                                    + 2*sizeof(task_t *), 1);
     list->avail = 2;
 
-    turf_storePtrRelaxed(&task->info, NULL);
-    turf_storePtrRelaxed(&task->successors, list);
-    turf_store16Relaxed(&task->joins, 0);
+    atomic_store_explicit(&task->info, NULL, memory_order_relaxed);
+    atomic_store_explicit(&task->successors, list, memory_order_relaxed);
+    atomic_store_explicit(&task->joins, 0, memory_order_relaxed);
 }
 task_t *new_tasks(int n) {
     task_t *task = calloc(sizeof(task_t), n);
@@ -454,14 +462,14 @@ void exec_dag(task_t *start, run_fn run, void *runinfo) {
         .nthreads = 8,
         .run = run,
         .runinfo = runinfo,
-        .initial = turf_exchangePtrRelaxed(&start->successors, NULL)
+        .initial = atomic_exchange_explicit(&start->successors, NULL, memory_order_relaxed)
     };
     // TODO: Create global mutex/condition
     // for handling task starvation and determining whether
     // work is complete.
     del_tasks(1, start);
 
-    global.initial->avail = turf_load16Relaxed(&global.initial->tasks);
+    global.initial->avail = atomic_load_explicit(&global.initial->tasks, memory_order_relaxed);
     if(global.initial->avail < 1) {
         fprintf(stderr, "exec_dag: start task has no dependencies!\n");
         free(global.initial);

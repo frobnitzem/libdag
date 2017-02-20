@@ -1,7 +1,11 @@
 #include <dag.h>
 #include <math.h>
+#include <stdint.h>
 #include "test.h"
-#include <turf/atomic.h>
+
+#ifndef M_PI
+#define M_PI (3.141592653589793)
+#endif
 
 // test 1
 void setup(int rank, int tasks, void *data, void *info) {
@@ -18,11 +22,11 @@ void dtor(int rank, int tasks, void *data, void *info) {
 // test 2-3
 typedef struct {
     int data, ok;
-    turf_atomic16_t atom;
+    _Atomic(int) atom;
 } global_info_t;
 typedef struct {
     int rank, tasks;
-    turf_atomic16_t *atom;
+    _Atomic(int) *atom;
     int *data;
     int *ok;
 } thread_info_t;
@@ -43,10 +47,10 @@ void *work2(void *data) {
     printf("# run rank %d/%d\n", thr->rank, thr->tasks);
     if(thr->rank == 1) { // producer
         *thr->data = 31337;
-        turf_store16(thr->atom, 42, TURF_MEMORY_ORDER_RELEASE);
+        atomic_store_explicit(thr->atom, 42, memory_order_release);
     } else { // consumer
-        uint16_t i;
-        while( !(i = turf_load16(thr->atom, TURF_MEMORY_ORDER_ACQUIRE)) );
+        int i;
+        while( !(i = atomic_load_explicit(thr->atom, memory_order_acquire)) );
         *thr->ok = (i == 42 && *thr->data == 31337);
     }
     return NULL;
@@ -338,7 +342,7 @@ int butterfly() {
 
 int main(int argc, char *argv[]) {
     global_info_t g = { .data = 0 };
-    turf_store16Relaxed(&g.atom, 0);
+    atomic_store_explicit(&g.atom, 0, memory_order_relaxed);
 
     printf("1..9\n");
     check("Simple threaded run succeeds",
