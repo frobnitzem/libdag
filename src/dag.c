@@ -22,7 +22,6 @@
 // Note: You must also change log naming code around "event-000.log"
 // if MAX_THREADS will really be over 1000.
 #define MAX_THREADS (1000)
-#define ERROR_COND (-MAX_THREADS)
 
 #if NTHREADS > MAX_THREADS
 #error "Can't have NTHREADS > MAX_THREADS"
@@ -53,6 +52,8 @@ static time_t dag_start_time;
 // INIT_STACK must be a power of 2
 #define INIT_STACK (128)
 #define MAX_STACK (32768)
+
+#define ERROR_COND (-MAX_THREADS-MAX_STACK)
 
 // Every task must maintain a TaskList of its current successors.
 // (starts at 2 elems)
@@ -125,19 +126,19 @@ static void resize_deque(thread_queue_t *thr) {
     if(T <= H) { // wrapped range
         // Check whether [0,T) or [H,deque_size) is a smaller copy size.
         if(T < thr->deque_size-H) {
-            progress("%d: resizing deque (left copy)\n", thr->rank);
+            //progress("%d: resizing deque (left copy)\n", thr->rank);
             if(T > 0) {
                 memcpy(deq+thr->deque_size, deq, T*sizeof(task_t *));
             }
             T += thr->deque_size;
         } else {
-            progress("%d: resizing deque (right copy)\n", thr->rank);
+            //progress("%d: resizing deque (right copy)\n", thr->rank);
             memcpy(deq+thr->deque_size+H, deq+H,
                             (thr->deque_size-H)*sizeof(task_t *));
             H += thr->deque_size;
         }
     } else {
-        progress("%d: resizing deque (no copy)\n", thr->rank);
+        //progress("%d: resizing deque (no copy)\n", thr->rank);
     }
     thr->deque = deq;
     thr->deque_size *= 2;
@@ -170,7 +171,7 @@ static int pop(thread_queue_t *thr, task_t *restrict *ret) {
     if(n < 1) { // handle exception
         atomic_fetch_add_explicit(&thr->nque, 1, memory_order_relaxed);
         *ret = NULL;
-        return 2*(n <= ERROR_COND);
+        return 2*(n <= MAX_THREADS);
     }
     thr->T--;
     *ret = DEQUE(thr->T);
@@ -241,8 +242,9 @@ static int add_task(struct TaskList *list, task_t *s) {
     return 0;
 }
 
-// Called when old->tasks == old->avail
+// Called by the first adding thread what finds old->tasks == old->avail.
 // Speculatively create a larger list.
+// This is speculative because enable_successors may make the addition moot.
 static struct TaskList *grow_tasklist(task_t *n, struct TaskList *old) {
     int sz = old->avail*2; //old->avail < 4 ? 8 : old->avail*2;
     struct TaskList *list = calloc(sizeof(struct TaskList)
@@ -268,13 +270,13 @@ static struct TaskList *grow_tasklist(task_t *n, struct TaskList *old) {
         struct TaskList *prev = old;
         if(atomic_compare_exchange_strong_explicit(
                         &n->successors, &prev, list, memory_order_release,
-                                                   memory_order_relaxed)) {
+                                                     memory_order_relaxed)) {
             // succeed.
-            progress("New successor list creation succeeds.\n");
+            //progress("New successor list creation succeeds.\n");
             free(old);
             return list;
         }
-        progress("New successor list creation fails.\n");
+        //progress("New successor list creation fails.\n");
         // fail.
         free(list);
         return prev;
@@ -291,7 +293,7 @@ static int add_successor(task_t *n, task_t *s) {
     while(1) {
         if(list == NULL) return 0;
         if( (r = add_task(list, s))) { // need resize
-            if(r == 1) { // first overflow
+            if(r == 2) { // first overflow
                 list = grow_tasklist(n, list);
                 continue;
             }
@@ -299,8 +301,11 @@ static int add_successor(task_t *n, task_t *s) {
             return 1; // It just happened.
         }
 
-        // double-check.
-        list = atomic_load_explicit(&n->successors, memory_order_relaxed);
+        // Wait until resize is complete.
+        { struct TaskList *old = list;
+          while( (list = atomic_load_explicit(&n->successors,
+                          memory_order_relaxed)) == old);
+        }
     };
 
     return 0; // YDNBH;
@@ -338,6 +343,8 @@ static int enable_successors(thread_queue_t *thr, task_t *n) {
 #endif
     int tasks = atomic_fetch_add_explicit(&list->tasks, list->avail+1,
                                               memory_order_relaxed);
+    if(tasks > list->avail) // current list is full (mid-expansion)
+        tasks = list->avail;
 
     int i;
     for(i=0; i<tasks; i++) {
@@ -378,8 +385,8 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
         int avail = thr->global->initial->avail;
         int mine  = avail/nthreads + (rank < (avail%nthreads));
         int start = (avail/nthreads)*rank + MIN(avail%nthreads, rank);
-        progress("%d: initial task range = [%d, %d)\n", thr->rank,
-                        start, start+mine);
+        //progress("%d: initial task range = [%d, %d)\n", thr->rank,
+        //                start, start+mine);
         for(int i=0; i<mine; i++) {
             task_t *task = thr->global->initial->task[i+start];
             // Double-check here.

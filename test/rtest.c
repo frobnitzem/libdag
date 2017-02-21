@@ -9,7 +9,7 @@
 #include <time.h>
 #include "test.h"
 
-#define USLEEP 100
+//#define USLEEP 100
 
 // from code.google.com/p/smhasher/wiki/MurmurHash3
 inline static uint32_t integerHash(uint32_t h) {
@@ -101,7 +101,7 @@ void add_task(node_t *dag, task_t *task, task_t *start, int i) {
         return;
     }
     //   Note that we can't link the task unless we know
-    // it was not yet added (and so should be activated by start).
+    // it was not yet added (and so should be activated by our start task).
     // This must be the first task linked.
     link_task(task+i+1, start);
 
@@ -113,11 +113,6 @@ void add_task(node_t *dag, task_t *task, task_t *start, int i) {
         add_task(dag, task, start, c);
         nchild += link_task(&task[i+1], &task[c+1]);
     }
-
-    /* only used in start-up phase, where it's done already.
-    if(n->nparent == 0)
-        link_task(task[0], task[i+1]);
-        */
 }
 
 task_t *hash_node(void *x, void *runinfo) {
