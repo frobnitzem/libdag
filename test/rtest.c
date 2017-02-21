@@ -97,11 +97,13 @@ void add_task(node_t *dag, task_t *task, task_t *start, int i) {
     node_t *n = dag + i;
     int nchild = 0;
 
-    // set => already added deps
     if(set_task_info(task+i+1, dag+i) != NULL) {
         return;
     }
-    link_task(task+i+1, start); // link all new tasks to start
+    //   Note that we can't link the task unless we know
+    // it was not yet added (and so should be activated by start).
+    // This must be the first task linked.
+    link_task(task+i+1, start);
 
     if(dag[i].id < 0) { // don't (yet) add children of lazy node
         return;

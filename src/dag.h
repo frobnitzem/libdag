@@ -30,5 +30,6 @@ int link_task(task_t *task, task_t *dep);
 void exec_dag(task_t *start, run_fn run, void *runinfo);
 void *get_task_info(task_t *task);
 void *set_task_info(task_t *task, void *info);
+int activate_task(task_t *task, void *info, task_t *start);
 
 #endif

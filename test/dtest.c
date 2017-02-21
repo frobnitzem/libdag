@@ -35,7 +35,7 @@ void setup2(int rank, int tasks, void *data, void *info) {
     global_info_t *g = (global_info_t *)info;
     thread_info_t *thr = (thread_info_t *)data;
 
-    printf("# setup rank %d/%d\n", rank, tasks);
+    //printf("# setup rank %d/%d\n", rank, tasks);
     thr->rank = rank;
     thr->tasks = tasks;
     thr->atom = &g->atom;
@@ -44,7 +44,7 @@ void setup2(int rank, int tasks, void *data, void *info) {
 }
 void *work2(void *data) {
     thread_info_t *thr = (thread_info_t *)data;
-    printf("# run rank %d/%d\n", thr->rank, thr->tasks);
+    //printf("# run rank %d/%d\n", thr->rank, thr->tasks);
     if(thr->rank == 1) { // producer
         *thr->data = 31337;
         atomic_store_explicit(thr->atom, 42, memory_order_release);
@@ -56,8 +56,21 @@ void *work2(void *data) {
     return NULL;
 }
 void dtor2(int rank, int tasks, void *data, void *info) {
-    printf("# cleanup rank %d/%d\n", rank, tasks);
+    //printf("# cleanup rank %d/%d\n", rank, tasks);
 }
+int test2() {
+    global_info_t g;
+    for(int i=0; i<1000; i++) {
+        g.ok = 0;
+        g.data = 0;
+        atomic_store_explicit(&g.atom, 0, memory_order_relaxed);
+        run_threaded(2, sizeof(thread_info_t), &setup2, &work2, &dtor2, &g);
+        if(!g.ok)
+            return 1;
+    }
+    return 0;
+}
+
 
 // remaining tests
 // from code.google.com/p/smhasher/wiki/MurmurHash3
@@ -341,15 +354,11 @@ int butterfly() {
 }
 
 int main(int argc, char *argv[]) {
-    global_info_t g = { .data = 0 };
-    atomic_store_explicit(&g.atom, 0, memory_order_relaxed);
 
-    printf("1..9\n");
+    printf("1..8\n");
     check("Simple threaded run succeeds",
           run_threaded(4, 0, &setup, &work, &dtor, NULL));
-    check("REL/ACQ threaded run succeeds",
-          run_threaded(2, sizeof(thread_info_t), &setup2, &work2, &dtor2, &g));
-    check("Producer / consumer memory fence worked", !g.ok);
+    check("REL/ACQ memory fence succeeds", test2());
 
     check("single-node dag execution succeeds", single_dag());
 

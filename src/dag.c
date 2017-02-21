@@ -1,14 +1,33 @@
-#include <strings.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 #include "dag.h"
 
-//#define DEBUG
+// responds to options: DEBUG, TIME_THREADS, NTHREADS
+
+#ifndef NTHREADS
+#define NTHREADS 8
+#endif
 
 // used by progress (but requires task->info point to an int)
 #define minfo(x) ((x)->info == NULL ? 0 : *(int *)(x)->info)
+
+// Used to determine error conditions
+// (when available queue entries < -MAX_THREADS).
+// Of course, it's not possible to naturally
+// have more the > MAX_THREADS simultaneous steal attempts
+// required to detect a false error.
+// Note: You must also change log naming code around "event-000.log"
+// if MAX_THREADS will really be over 1000.
+#define MAX_THREADS (1000)
+#define ERROR_COND (-MAX_THREADS)
+
+#if NTHREADS > MAX_THREADS
+#error "Can't have NTHREADS > MAX_THREADS"
+#endif
+
 
 #ifdef DEBUG
 #define progress(...) printf(__VA_ARGS__)
@@ -16,7 +35,22 @@
 #define progress(...)
 #endif
 
+#ifdef TIME_THREADS
+#include <sys/time.h>
+static time_t dag_start_time;
+#define log_event(s) { \
+    struct timeval tp; \
+    gettimeofday(&tp, NULL); \
+    fprintf(thr->event_log, "%ld.%06d: %s\n", \
+            tp.tv_sec - dag_start_time, tp.tv_usec, s); \
+}
+#else
+#define log_event(s)
+#endif
+
+
 // Initial and max deque sizes for ea. thread.
+// INIT_STACK must be a power of 2
 #define INIT_STACK (128)
 #define MAX_STACK (32768)
 
@@ -40,9 +74,10 @@ struct GlobalInfo {
 
 // dag.h: typedef struct ThreadQueue thread_queue_t;
 struct ThreadQueue {
-    pthread_mutex_t L;
     task_t **deque;
-    task_t **T, **H, **E;
+    unsigned T;
+    _Atomic(unsigned ) H;
+    _Atomic(int) nque;
 
     int deque_size; // len(deque)
     int rank;
@@ -51,116 +86,121 @@ struct ThreadQueue {
     FILE *event_log;
 #endif
 };
-
-#ifdef TIME_THREADS
-#include <sys/time.h>
-static time_t dag_start_time;
-#define log_event(s) { \
-    struct timeval tp; \
-    gettimeofday(&tp, NULL); \
-    fprintf(thr->event_log, "%ld.%06d: %s\n", \
-            tp.tv_sec - dag_start_time, tp.tv_usec, s); \
-}
-#else
-#define log_event(s)
-#endif
+#define DEQUE(n) thr->deque[(n) & (thr->deque_size-1)]
 
 /********************* Work queue routines *****************/
 // Called by own thread when push() finds space is exhausted.
 static void resize_deque(thread_queue_t *thr) {
-    int sz;
-    lock(&thr->L);
-    sz = thr->T - thr->H;
-    if(sz > MAX_STACK) {
-        fprintf(stderr, "Thread %d has stack size %d (> max=%d)\n",
-                         thr->rank, sz, MAX_STACK);
+    // Set que size to zero, and store current size.
+    // This halts any steal attempts (and therefore prevents access to H).
+    int nque = atomic_exchange_explicit(&thr->nque, 0, memory_order_acquire);
+
+    // Expected H after processing all pending steals.
+    unsigned H = thr->T - nque;
+    unsigned T = thr->T & (thr->deque_size-1);
+
+    // Spin until pending steals are complete.
+#ifdef DEBUG
+    int H2;
+    while( (H2 = atomic_load_explicit(&thr->H, memory_order_relaxed)) != H) {
+        progress("%d: waiting for %d pending steal(s)\n", thr->rank, H-H2);
+    }
+#else
+    while(atomic_load_explicit(&thr->H, memory_order_relaxed) != H);
+#endif
+    H = H & (thr->deque_size-1);
+
+    if(thr->deque_size >= MAX_STACK) {
+        fprintf(stderr, "Thread %d has stack size %d,"
+                        " and will exceed max on resize.\n", thr->rank, nque);
         exit(1);
     }
-    if(sz > thr->deque_size/2) {
-        task_t **deq = realloc(thr->deque, sz*2*sizeof(task_t *));
-        if(deq == NULL) {
-            fprintf(stderr, "Memory error: stack size = %d\n", sz);
-            exit(1);
+
+    // Double the deque size.
+    task_t **deq = realloc(thr->deque, thr->deque_size*2*sizeof(task_t *));
+    if(deq == NULL) {
+        fprintf(stderr, "Memory error: stack size = %d\n", thr->deque_size);
+        exit(1);
+    }
+    if(T <= H) { // wrapped range
+        // Check whether [0,T) or [H,deque_size) is a smaller copy size.
+        if(T < thr->deque_size-H) {
+            progress("%d: resizing deque (left copy)\n", thr->rank);
+            if(T > 0) {
+                memcpy(deq+thr->deque_size, deq, T*sizeof(task_t *));
+            }
+            T += thr->deque_size;
+        } else {
+            progress("%d: resizing deque (right copy)\n", thr->rank);
+            memcpy(deq+thr->deque_size+H, deq+H,
+                            (thr->deque_size-H)*sizeof(task_t *));
+            H += thr->deque_size;
         }
-        thr->T += deq - thr->deque; // relocate ptrs
-        thr->H += deq - thr->deque;
-        thr->E += deq - thr->deque;
-        thr->deque = deq;
-        thr->deque_size = sz*2;
+    } else {
+        progress("%d: resizing deque (no copy)\n", thr->rank);
     }
-    if(thr->H != thr->deque) { // move back to start
-        bcopy(thr->H, thr->deque, sz*sizeof(task_t *));
-        thr->T -= thr->H - thr->deque;
-        thr->E -= thr->H - thr->deque;
-        thr->H = thr->deque;
-    }
-    unlock(&thr->L);
+    thr->deque = deq;
+    thr->deque_size *= 2;
+
+    atomic_store_explicit(&thr->H, H, memory_order_relaxed);
+    thr->T = H + nque; // maintain T-H = nque
+
+    // Add back the removed que elements to re-enable stealing.
+    atomic_fetch_add_explicit(&thr->nque, nque, memory_order_release);
 }
 
-// THE protocol.
+// Atomic sized dequeue protocol (replace THE protocol).
 // push / pop from own queue
 static void push(thread_queue_t *thr, task_t *task) {
-    // Next push is out of bounds -- need to resize stack.
-    if(thr->T - thr->deque >= thr->deque_size) {
+    // 'n' is an upper bound on the que size, so tells us if a resize is needed.
+    int n = atomic_load_explicit(&thr->nque, memory_order_relaxed);
+    if(n >= thr->deque_size) {
         resize_deque(thr);
     }
-
-    *thr->T = task;
+    DEQUE(thr->T) = task;
     thr->T++;
+    atomic_fetch_add_explicit(&thr->nque, 1, memory_order_release);
 }
 
-static task_t *pop(thread_queue_t *thr) {
-    thr->T--;
-    __asm__ volatile ("mfence":::"memory");
-    usleep(100);
-    //atomic_swap(&thr->E, &E, TURF_MEMORY_ORDER_RELAXED);
-
-    if(thr->E > thr->T) { // handle exception
-        thr->T++;
-        lock(&thr->L);
-        if(thr->E > thr->T) {
-            progress("Detected error in pop()\n");
-            unlock(&thr->L);
-            return NULL;
-        }
-        thr->T--;
-        if(thr->H > thr->T) {
-            thr->T++;
-            unlock(&thr->L);
-            return NULL;
-        }
-        unlock(&thr->L);
-    } else {
-        progress("%d: successful pop (%d)\n", thr->rank, minfo(*thr->T));
+// returns 2 on error condition
+//         1 on regular deque
+//         0 on empty que
+static int pop(thread_queue_t *thr, task_t *restrict *ret) {
+    int n = atomic_fetch_add_explicit(&thr->nque, -1, memory_order_relaxed);
+    if(n < 1) { // handle exception
+        atomic_fetch_add_explicit(&thr->nque, 1, memory_order_relaxed);
+        *ret = NULL;
+        return 2*(n <= ERROR_COND);
     }
-    return *thr->T;
+    thr->T--;
+    *ret = DEQUE(thr->T);
+    progress("%d: successful pop (%d)\n", thr->rank, minfo(*ret));
+    return 1;
 }
 
-// steal task from victim
-static task_t *steal(thread_queue_t *v) {
-    task_t *ret;
-    lock(&v->L); // should acquire T
-    v->E++;
-    //atomic_threadFenceRelease(); // release change to E
-    //atomic_threadFenceAcquire(); // be sure T is there
-    if(v->E > v->T) {
-        v->E--;
-        unlock(&v->L);
+// steal task from victim (thr)
+static task_t *steal(thread_queue_t *thr) {
+    int H, n = atomic_fetch_add_explicit(&thr->nque, -1, memory_order_acquire);
+    if(n < 1) {
+        atomic_fetch_add_explicit(&thr->nque, 1, memory_order_relaxed);
         return NULL;
     }
-    ret = *v->H;
-    v->H++;
-    unlock(&v->L);
-    return ret;
+    H = atomic_fetch_add_explicit(&thr->H, 1, memory_order_relaxed);
+    return DEQUE(H);
 }
 
 static task_t *get_work(thread_queue_t *thr) {
-    task_t *w = pop(thr);
+    task_t *w = NULL;
 
     while(w == NULL) {
-        if(thr->E > thr->T) {
-            progress("Found error condition!\n");
-            return NULL;
+        switch(pop(thr, &w)) {
+            case 1:
+                return w;
+            case 0:
+                break;
+            case 2:
+                progress("Found error condition!\n");
+                return NULL;
         }
 
         log_event("Attempting Steal");
@@ -319,9 +359,10 @@ static int enable_successors(thread_queue_t *thr, task_t *n) {
 static void thread_ctor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
 
-    Pthread_mutex_init(&thr->L, NULL);
     thr->deque = malloc(sizeof(task_t *)*INIT_STACK);
-    thr->T = thr->H = thr->E = thr->deque;
+    thr->T = 0;
+    atomic_store_explicit(&thr->H, 0, memory_order_relaxed);
+    atomic_store_explicit(&thr->nque, 0, memory_order_relaxed);
 
     thr->deque_size = INIT_STACK;
     thr->rank = rank;
@@ -337,7 +378,8 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
         int avail = thr->global->initial->avail;
         int mine  = avail/nthreads + (rank < (avail%nthreads));
         int start = (avail/nthreads)*rank + MIN(avail%nthreads, rank);
-        progress("%d: Initial start = %d, mine = %d\n", thr->rank, start, mine);
+        progress("%d: initial task range = [%d, %d)\n", thr->rank,
+                        start, start+mine);
         for(int i=0; i<mine; i++) {
             task_t *task = thr->global->initial->task[i+start];
             // Double-check here.
@@ -361,7 +403,6 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
 static void thread_dtor(int rank, int nthreads, void *data, void *info) {
     thread_queue_t *thr = (thread_queue_t *)data;
     free(thr->deque);
-    Pthread_mutex_destroy(&thr->L);
 #ifdef TIME_THREADS
     fclose(thr->event_log);
 #endif
@@ -401,9 +442,8 @@ final: // found end, signal all dag-s
     log_event("Sending Term Signal");
     for(int k=0; k<thr->global->nthreads; k++) {
         if(k == thr->rank) continue;
-        lock(&thr->global->threads[k].L);
-        thr->global->threads[k].E += MAX_STACK;
-        unlock(&thr->global->threads[k].L);
+        atomic_store_explicit(&thr->global->threads[k].nque, ERROR_COND, 
+                              memory_order_relaxed);
     }
     atomic_thread_fence(memory_order_release);
     return NULL;
@@ -413,10 +453,11 @@ final: // found end, signal all dag-s
 void *get_task_info(task_t *task) {
     return atomic_load_explicit(&task->info, memory_order_acquire);
 }
+
 void *set_task_info(task_t *task, void *info) {
     void *out = NULL;
     atomic_compare_exchange_strong_explicit(&task->info, &out, info,
-                                    memory_order_release, memory_order_relaxed);
+                              memory_order_release, memory_order_relaxed);
     return out;
 }
 
@@ -424,7 +465,7 @@ void del_tasks(int n, task_t *task) {
     for(int i=0; i<n; i++) {
         struct TaskList *list = atomic_load_explicit(&task[i].successors,
                                                      memory_order_acquire);
-        if(list) free(list); // incomplete?
+        if(list) free(list); // This will be NULL unless the task was never completed.
     }
     free(task);
 }
@@ -438,6 +479,7 @@ static inline void init_task(task_t *task) {
     atomic_store_explicit(&task->successors, list, memory_order_relaxed);
     atomic_store_explicit(&task->joins, 0, memory_order_relaxed);
 }
+
 task_t *new_tasks(int n) {
     task_t *task = calloc(sizeof(task_t), n);
     for(int i=0; i<n; i++) {
@@ -445,6 +487,7 @@ task_t *new_tasks(int n) {
     }
     return task;
 }
+
 task_t *start_task() {
     return new_tasks(1);
 }
@@ -452,14 +495,13 @@ task_t *start_task() {
 // Returns '1' if the dep is incomplete (and thus linking was
 // successful) or else '0' if the dep is already complete.
 int link_task(task_t *task, task_t *dep) {
-    int n;
     return add_successor(dep, task);
 }
 
 void exec_dag(task_t *start, run_fn run, void *runinfo) {
     struct GlobalInfo global = {
         .threads = NULL, // filled in by rank 0
-        .nthreads = 8,
+        .nthreads = NTHREADS,
         .run = run,
         .runinfo = runinfo,
         .initial = atomic_exchange_explicit(&start->successors, NULL, memory_order_relaxed)
