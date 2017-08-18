@@ -8,5 +8,5 @@ Description: A library for executing task dags with pthreads
 URL: https://www.predictivestatmech.org/dag
 Version: @VERSION@
 Requires: 
-Cflags: -I${includedir}
+Cflags: -std=c11 -I${includedir}
 Libs: -L${libdir} -ldag

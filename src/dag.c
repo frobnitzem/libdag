@@ -7,21 +7,8 @@
 
 // responds to options: DEBUG, TIME_THREADS, NTHREADS
 
-#ifndef NTHREADS
-#define NTHREADS 8
-#endif
-
 // used by progress (but requires task->info point to an int)
 #define minfo(x) ((x)->info == NULL ? 0 : *(int *)(x)->info)
-
-// Used to determine error conditions
-// (when available queue entries < -MAX_THREADS).
-// Of course, it's not possible to naturally
-// have more the > MAX_THREADS simultaneous steal attempts
-// required to detect a false error.
-// Note: You must also change log naming code around "event-000.log"
-// if MAX_THREADS will really be over 1000.
-#define MAX_THREADS (1000)
 
 #if NTHREADS > MAX_THREADS
 #error "Can't have NTHREADS > MAX_THREADS"
@@ -68,9 +55,16 @@ struct GlobalInfo {
     thread_queue_t *threads;
     int nthreads;
     run_fn run;
-    void *runinfo;
 
     struct TaskList *initial; // where tasks was copied to avail for convenience
+};
+
+// This closure is passed to the thread_ctor function.
+struct SetupInfo {
+    struct GlobalInfo *global;
+    setup_fn init;
+    dtor_fn  dtor;
+    void *info0;
 };
 
 // dag.h: typedef struct ThreadQueue thread_queue_t;
@@ -83,6 +77,7 @@ struct ThreadQueue {
     int deque_size; // len(deque)
     int rank;
     struct GlobalInfo *global;
+    void *local;
 #ifdef TIME_THREADS
     FILE *event_log;
 #endif
@@ -364,6 +359,7 @@ static int enable_successors(thread_queue_t *thr, task_t *n) {
 /***************** Per-Thread Programs *****************/
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 static void thread_ctor(int rank, int nthreads, void *data, void *info) {
+    struct SetupInfo *info4 = info;
     thread_queue_t *thr = (thread_queue_t *)data;
 
     thr->deque = malloc(sizeof(task_t *)*INIT_STACK);
@@ -373,7 +369,10 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
 
     thr->deque_size = INIT_STACK;
     thr->rank = rank;
-    thr->global = (struct GlobalInfo *)info;
+    thr->global = info4->global;
+    thr->local = info4->info0;
+    if(info4->init != NULL)
+        thr->local  = info4->init(rank, nthreads, info4->info0);
     if(rank == 0) {
         thr->global->threads = thr;
     }
@@ -408,8 +407,11 @@ static void thread_ctor(int rank, int nthreads, void *data, void *info) {
 }
 
 static void thread_dtor(int rank, int nthreads, void *data, void *info) {
+    struct SetupInfo *info4 = info;
     thread_queue_t *thr = (thread_queue_t *)data;
     free(thr->deque);
+    if(info4->dtor != NULL)
+        info4->dtor(rank, nthreads, thr->local, info4->info0);
 #ifdef TIME_THREADS
     fclose(thr->event_log);
 #endif
@@ -427,8 +429,7 @@ static void *thread_work(void *data) {
         progress("%d: working on (%d)\n", thr->rank, minfo(task));
         if(info != NULL) {
             log_event("Running Task");
-            start = thr->global->run(get_task_info(task),
-                                             thr->global->runinfo);
+            start = thr->global->run(get_task_info(task), thr->local);
             log_event("Adding Deps");
         }
         if(start == NULL) {
@@ -506,13 +507,25 @@ int link_task(task_t *task, task_t *dep) {
 }
 
 void exec_dag(task_t *start, run_fn run, void *runinfo) {
+    exec_dag2(start, run, NULL, NULL, NTHREADS, runinfo);
+}
+
+void exec_dag2(task_t *start, run_fn run, setup_fn init, dtor_fn dtor,
+                       int threads, void *info0) {
+    if(threads < 1 || threads > MAX_THREADS) {
+        fprintf(stderr, "Invalid number of threads: %d -- outside [1,%d]\n",
+                        threads, MAX_THREADS);
+        if(threads < 1) return;
+        threads = MAX_THREADS;
+    }
     struct GlobalInfo global = {
         .threads = NULL, // filled in by rank 0
-        .nthreads = NTHREADS,
+        .nthreads = threads,
         .run = run,
-        .runinfo = runinfo,
         .initial = atomic_exchange_explicit(&start->successors, NULL, memory_order_relaxed)
     };
+    struct SetupInfo info4 = {&global, init, dtor, info0};
+
     // TODO: Create global mutex/condition
     // for handling task starvation and determining whether
     // work is complete.
@@ -528,8 +541,8 @@ void exec_dag(task_t *start, run_fn run, void *runinfo) {
 #ifdef TIME_THREADS
     dag_start_time = time(NULL);
 #endif
-    run_threaded(global.nthreads, sizeof(thread_queue_t), &thread_ctor,
-                 &thread_work, &thread_dtor, &global);
+    run_threaded(threads, sizeof(thread_queue_t), &thread_ctor,
+                 &thread_work, &thread_dtor, &info4);
     free(global.initial);
 }
 
